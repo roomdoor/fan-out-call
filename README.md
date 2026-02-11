@@ -18,11 +18,29 @@ Mock 지연 시뮬레이션 기본값:
 - 금융사 서비스: `LenderApiService` (`buildRequest`, `callApi`, `toEntity`)
 - 금융사별 서비스 레지스트리: `LenderApiServiceRegistry`
 - Fan-out 실행 인터페이스: `LenderFanOutExecutor`
-- 현재 Fan-out 구현체: `CoroutineLenderFanOutExecutor`
+- Fan-out 구현체:
+  - `CoroutineLenderFanOutExecutor`
+  - `SequentialSingleThreadLenderFanOutExecutor` (bad case, 단일 스레드 순차 처리)
+
+- 모드별 서비스 클래스:
+  - `CoroutineLoanLimitQueryService`
+  - `SequentialLoanLimitQueryService`
 
 ## API
 
-### POST `/api/v1/loan-limit/queries`
+### Coroutine Mode
+
+- `POST /api/v1/loan-limit/queries`
+- `GET /api/v1/loan-limit/queries/{transactionId}`
+- `GET /api/v1/loan-limit/queries/number/{transactionNo}`
+
+### Sequential Single-Thread Mode (Bad Case)
+
+- `POST /api/v1/loan-limit/sequential/queries`
+- `GET /api/v1/loan-limit/sequential/queries/{transactionId}`
+- `GET /api/v1/loan-limit/sequential/queries/number/{transactionNo}`
+
+예시 요청 바디:
 
 ```json
 {
@@ -37,13 +55,9 @@ Mock 지연 시뮬레이션 기본값:
 진행 중에는 `finishedAt`이 `null`이고 `results`는 비어 있을 수 있습니다.
 이후 조회 API에서 `transactionNo` 또는 `transactionId`로 polling 조회합니다.
 
-### GET `/api/v1/loan-limit/queries/{transactionId}`
-
-POST 호출 시 받은 `transactionId`로 진행 상태/완료 결과를 조회합니다.
-
-### GET `/api/v1/loan-limit/queries/number/{transactionNo}`
-
-POST 호출 시 받은 `transactionNo`(유니크 번호)로 진행 상태/완료 결과를 조회합니다.
+각 mode API 모두 `202 Accepted`를 즉시 반환하고, 외부 API fan-out은 백그라운드에서 진행됩니다.
+응답에는 `transactionNo`(유니크 번호), `transactionId`(UUID), 진행 상태(`status`), 진행 카운트(`successCount`, `failureCount`, `completedCount`)가 포함됩니다.
+진행 중에는 `finishedAt`이 `null`이고 `results`는 비어 있을 수 있습니다.
 
 ## 실행 전 준비
 

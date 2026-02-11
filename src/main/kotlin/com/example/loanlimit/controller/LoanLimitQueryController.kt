@@ -2,7 +2,7 @@ package com.example.loanlimit.controller
 
 import com.example.loanlimit.dto.LoanLimitQueryRequest
 import com.example.loanlimit.dto.LoanLimitQueryResponse
-import com.example.loanlimit.service.LoanLimitQueryService
+import com.example.loanlimit.service.CoroutineLoanLimitQueryService
 import io.swagger.v3.oas.annotations.Operation
 import io.swagger.v3.oas.annotations.Parameter
 import io.swagger.v3.oas.annotations.tags.Tag
@@ -18,9 +18,9 @@ import org.springframework.web.bind.annotation.RestController
 
 @RestController
 @RequestMapping("/api/v1/loan-limit")
-@Tag(name = "Loan Limit", description = "Loan-limit fan-out query and polling endpoints")
+@Tag(name = "Loan Limit Coroutine", description = "Loan-limit fan-out query and polling endpoints (coroutine mode)")
 class LoanLimitQueryController(
-    private val loanLimitQueryService: LoanLimitQueryService,
+    private val coroutineLoanLimitQueryService: CoroutineLoanLimitQueryService,
 ) {
     @PostMapping("/queries")
     @ResponseStatus(HttpStatus.ACCEPTED)
@@ -29,7 +29,7 @@ class LoanLimitQueryController(
         description = "Creates a new transaction and starts lender fan-out asynchronously. Returns immediately with transaction identifiers.",
     )
     fun query(@Valid @RequestBody request: LoanLimitQueryRequest): LoanLimitQueryResponse {
-        return loanLimitQueryService.query(request)
+        return coroutineLoanLimitQueryService.query(request)
     }
 
     @GetMapping("/queries/{transactionId}")
@@ -38,7 +38,7 @@ class LoanLimitQueryController(
         @Parameter(description = "UUID transaction identifier from POST /queries")
         @PathVariable transactionId: String,
     ): LoanLimitQueryResponse {
-        return loanLimitQueryService.getByTransactionId(transactionId)
+        return coroutineLoanLimitQueryService.getByTransactionId(transactionId)
     }
 
     @GetMapping("/queries/number/{transactionNo}")
@@ -47,6 +47,6 @@ class LoanLimitQueryController(
         @Parameter(description = "Numeric transaction identifier from POST /queries")
         @PathVariable transactionNo: Long,
     ): LoanLimitQueryResponse {
-        return loanLimitQueryService.getByTransactionNo(transactionNo)
+        return coroutineLoanLimitQueryService.getByTransactionNo(transactionNo)
     }
 }
