@@ -1,0 +1,43 @@
+spring:
+  application:
+    name: loan-limit-gateway
+  datasource:
+    url: jdbc:mysql://localhost:3306/loan_limit_gateway?serverTimezone=Asia/Seoul&characterEncoding=UTF-8
+    username: root
+    password: root
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        format_sql: true
+    open-in-view: false
+  flyway:
+    enabled: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+
+app:
+  lenders:
+    count: 50
+    parallelism: 50
+    per-call-timeout-ms: 50000
+    required-completion-ms: 60000
+  mock:
+    min-latency-ms: 3000
+    max-latency-ms: 15000
+    slow-min-latency-ms: 30000
+    slow-max-latency-ms: 45000
+    slow-lender-count: 2
+    success-rate-percent: 85
