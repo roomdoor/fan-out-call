@@ -21,10 +21,12 @@ Mock 지연 시뮬레이션 기본값:
 - Fan-out 구현체:
   - `CoroutineLenderFanOutExecutor`
   - `SequentialSingleThreadLenderFanOutExecutor` (bad case, 단일 스레드 순차 처리)
+  - `AsyncThreadPoolLenderFanOutExecutor` (`@Async + ThreadPool` 병렬 처리)
 
 - 모드별 서비스 클래스:
   - `CoroutineLoanLimitQueryService`
   - `SequentialLoanLimitQueryService`
+  - `AsyncThreadPoolLoanLimitQueryService`
 
 ## API
 
@@ -35,6 +37,10 @@ Mock 지연 시뮬레이션 기본값:
 ### Sequential Single-Thread Mode (Bad Case)
 
 - `POST /api/v1/loan-limit/sequential/queries`
+
+### Async ThreadPool Mode
+
+- `POST /api/v1/loan-limit/async-threadpool/queries`
 
 ### Unified Polling (All Modes)
 
@@ -56,9 +62,11 @@ Mock 지연 시뮬레이션 기본값:
 진행 중에는 `finishedAt`이 `null`이고 `results`는 비어 있을 수 있습니다.
 이후 조회 API에서 `transactionNo` 또는 `transactionId`로 polling 조회합니다.
 
-각 mode API 모두 `202 Accepted`를 즉시 반환하고, 외부 API fan-out은 백그라운드에서 진행됩니다.
-응답에는 `transactionNo`(유니크 번호), `transactionId`(UUID), 진행 상태(`status`), 진행 카운트(`successCount`, `failureCount`, `completedCount`)가 포함됩니다.
-진행 중에는 `finishedAt`이 `null`이고 `results`는 비어 있을 수 있습니다.
+`@Async + ThreadPool` 설정 기본값:
+- `app.async-thread-pool.core-pool-size`: 16
+- `app.async-thread-pool.max-pool-size`: 64
+- `app.async-thread-pool.queue-capacity`: 500
+- `app.async-thread-pool.thread-name-prefix`: `loan-limit-async-`
 
 ## 실행 전 준비
 

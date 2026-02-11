@@ -34,6 +34,11 @@ app:
     parallelism: 50
     per-call-timeout-ms: 50000
     required-completion-ms: 60000
+  async-thread-pool:
+    core-pool-size: 50
+    max-pool-size: 64
+    queue-capacity: 100
+    thread-name-prefix: loan-limit-async-
   mock:
     min-latency-ms: 3000
     max-latency-ms: 15000

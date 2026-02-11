@@ -5,6 +5,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties
 @ConfigurationProperties(prefix = "app")
 data class AppProperties(
     val lenders: Lenders = Lenders(),
+    val asyncThreadPool: AsyncThreadPool = AsyncThreadPool(),
     val mock: Mock = Mock(),
 ) {
     data class Lenders(
@@ -12,6 +13,13 @@ data class AppProperties(
         val parallelism: Int = 50,
         val perCallTimeoutMs: Long = 5_000,
         val requiredCompletionMs: Long = 60_000,
+    )
+
+    data class AsyncThreadPool(
+        val corePoolSize: Int = 50,
+        val maxPoolSize: Int = 64,
+        val queueCapacity: Int = 100,
+        val threadNamePrefix: String = "loan-limit-async-",
     )
 
     data class Mock(
