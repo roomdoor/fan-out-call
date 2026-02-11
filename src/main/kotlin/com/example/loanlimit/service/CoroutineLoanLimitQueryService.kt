@@ -17,12 +17,4 @@ class CoroutineLoanLimitQueryService(
             modeName = "COROUTINE",
         )
     }
-
-    fun getByTransactionId(transactionId: String): LoanLimitQueryResponse {
-        return loanLimitQueryOrchestrator.getByTransactionId(transactionId)
-    }
-
-    fun getByTransactionNo(transactionNo: Long): LoanLimitQueryResponse {
-        return loanLimitQueryOrchestrator.getByTransactionNo(transactionNo)
-    }
 }

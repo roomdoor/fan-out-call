@@ -31,14 +31,15 @@ Mock 지연 시뮬레이션 기본값:
 ### Coroutine Mode
 
 - `POST /api/v1/loan-limit/queries`
-- `GET /api/v1/loan-limit/queries/{transactionId}`
-- `GET /api/v1/loan-limit/queries/number/{transactionNo}`
 
 ### Sequential Single-Thread Mode (Bad Case)
 
 - `POST /api/v1/loan-limit/sequential/queries`
-- `GET /api/v1/loan-limit/sequential/queries/{transactionId}`
-- `GET /api/v1/loan-limit/sequential/queries/number/{transactionNo}`
+
+### Unified Polling (All Modes)
+
+- `GET /api/v1/loan-limit/queries/{transactionId}`
+- `GET /api/v1/loan-limit/queries/number/{transactionNo}`
 
 예시 요청 바디:
 
