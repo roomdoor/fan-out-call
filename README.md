@@ -22,11 +22,13 @@ Mock 지연 시뮬레이션 기본값:
   - `CoroutineLenderFanOutExecutor`
   - `SequentialSingleThreadLenderFanOutExecutor` (bad case, 단일 스레드 순차 처리)
   - `AsyncThreadPoolLenderFanOutExecutor` (`@Async + ThreadPool` 병렬 처리)
+  - `WebClientLenderFanOutExecutor` (`WebClient` non-blocking 병렬 처리)
 
 - 모드별 서비스 클래스:
   - `CoroutineLoanLimitQueryService`
   - `SequentialLoanLimitQueryService`
   - `AsyncThreadPoolLoanLimitQueryService`
+  - `WebClientLoanLimitQueryService`
 
 ## API
 
@@ -41,6 +43,10 @@ Mock 지연 시뮬레이션 기본값:
 ### Async ThreadPool Mode
 
 - `POST /api/v1/loan-limit/async-threadpool/queries`
+
+### WebClient Non-Blocking Mode
+
+- `POST /api/v1/loan-limit/webclient/queries`
 
 ### Unified Polling (All Modes)
 
@@ -63,10 +69,16 @@ Mock 지연 시뮬레이션 기본값:
 이후 조회 API에서 `transactionNo` 또는 `transactionId`로 polling 조회합니다.
 
 `@Async + ThreadPool` 설정 기본값:
-- `app.async-thread-pool.core-pool-size`: 16
+- `app.async-thread-pool.core-pool-size`: 50
 - `app.async-thread-pool.max-pool-size`: 64
-- `app.async-thread-pool.queue-capacity`: 500
+- `app.async-thread-pool.queue-capacity`: 100
 - `app.async-thread-pool.thread-name-prefix`: `loan-limit-async-`
+
+`WebClient` fan-out 설정 기본값:
+- `app.web-client-fan-out.mock-base-url`: `http://localhost:18080`
+- `app.web-client-fan-out.max-concurrency`: 50
+
+WebClient mode 실행 전, 별도 mock 서버(`loan-limit-mock-server`)를 먼저 띄워야 합니다.
 
 ## 실행 전 준비
 

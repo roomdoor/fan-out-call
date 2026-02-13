@@ -39,6 +39,9 @@ app:
     max-pool-size: 64
     queue-capacity: 100
     thread-name-prefix: loan-limit-async-
+  web-client-fan-out:
+    mock-base-url: http://localhost:18080
+    max-concurrency: 50
   mock:
     min-latency-ms: 3000
     max-latency-ms: 15000

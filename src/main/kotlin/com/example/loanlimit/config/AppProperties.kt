@@ -6,6 +6,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties
 data class AppProperties(
     val lenders: Lenders = Lenders(),
     val asyncThreadPool: AsyncThreadPool = AsyncThreadPool(),
+    val webClientFanOut: WebClientFanOut = WebClientFanOut(),
     val mock: Mock = Mock(),
 ) {
     data class Lenders(
@@ -20,6 +21,11 @@ data class AppProperties(
         val maxPoolSize: Int = 64,
         val queueCapacity: Int = 100,
         val threadNamePrefix: String = "loan-limit-async-",
+    )
+
+    data class WebClientFanOut(
+        val mockBaseUrl: String = "http://localhost:8080",
+        val maxConcurrency: Int = 50,
     )
 
     data class Mock(
