@@ -11,8 +11,8 @@ import java.util.concurrent.Executor
 class AsyncExecutionConfig(
     private val appProperties: AppProperties,
 ) {
-    @Bean(name = [LENDER_ASYNC_EXECUTOR])
-    fun lenderAsyncExecutor(): Executor {
+    @Bean(name = [BANK_ASYNC_EXECUTOR])
+    fun bankAsyncExecutor(): Executor {
         return ThreadPoolTaskExecutor().apply {
             corePoolSize = appProperties.asyncThreadPool.corePoolSize
             maxPoolSize = appProperties.asyncThreadPool.maxPoolSize
@@ -25,6 +25,6 @@ class AsyncExecutionConfig(
     }
 
     companion object {
-        const val LENDER_ASYNC_EXECUTOR = "lenderAsyncExecutor"
+        const val BANK_ASYNC_EXECUTOR = "bankAsyncExecutor"
     }
 }

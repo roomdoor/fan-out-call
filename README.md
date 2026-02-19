@@ -3,32 +3,42 @@
 Spring Boot + Kotlin + MySQL 기반의 대출 한도 조회 외부 API 호출용 서버 골격입니다.
 
 현재 구현 범위:
-- 50개 금융사 API를 동시 호출하는 단일 진입 API
+- 50개 금융사 API fan-out 호출 submit API (4개 모드)
 - 금융사별 서비스 인터페이스(`buildRequest`, `callApi`, `toEntity`) 기반 호출 구조
 - 모든 금융사 요청/응답 포맷은 현재 `NESTED_JSON`으로 통일
-- 실제 외부 연동 대신 Mock 응답 사용
+- 모든 모드는 별도 가짜 은행 서버(`loan-limit-mock-server`)를 호출
 - 배치 실행 이력 + 금융사별 호출 결과 MySQL 저장
-
-Mock 지연 시뮬레이션 기본값:
-- 대부분 금융사: 3~15초
-- 일부 금융사(기본 2개): 30~45초
 
 ## 내부 구조
 
-- 금융사 서비스: `LenderApiService` (`buildRequest`, `callApi`, `toEntity`)
-- 금융사별 서비스 레지스트리: `LenderApiServiceRegistry`
-- Fan-out 실행 인터페이스: `LenderFanOutExecutor`
-- Fan-out 구현체:
-  - `CoroutineLenderFanOutExecutor`
-  - `SequentialSingleThreadLenderFanOutExecutor` (bad case, 단일 스레드 순차 처리)
-  - `AsyncThreadPoolLenderFanOutExecutor` (`@Async + ThreadPool` 병렬 처리)
-  - `WebClientLenderFanOutExecutor` (`WebClient` non-blocking 병렬 처리)
+패키지 기준 주요 구조:
 
-- 모드별 서비스 클래스:
-  - `CoroutineLoanLimitQueryService`
-  - `SequentialLoanLimitQueryService`
-  - `AsyncThreadPoolLoanLimitQueryService`
-  - `WebClientLoanLimitQueryService`
+- `loanLimitBatchRun`
+  - `controller/LoanLimitBatchRunController`: 통합 polling API
+  - `service/LoanLimitQueryOrchestrator`: submit 공통 처리 + 백그라운드 fan-out 실행 오케스트레이션
+  - `service/LoanLimitBatchRunService`: run 상태 완료/실패 처리 + transactionId/transactionNo 조회
+  - `repository/LoanLimitBatchRunRepository`
+  - `dto/request|response`, `entity`
+- `bankCallResult`
+  - `service/BankCallResultService`: 결과 저장 + retry
+  - `service/BankCatalogService`: `BANK-01` ~ `BANK-50` 코드 목록 생성
+  - `repository/BankCallResultRepository`
+  - `dto`, `entity`
+- `fanout`
+  - `BankFanOutExecutor` (공통 인터페이스)
+  - `BankFanOutExecutorRegistry` (modeName -> executor 매핑)
+  - `coroutine/CoroutineBankFanOutExecutor`
+  - `sequential/SequentialSingleThreadBankFanOutExecutor`
+  - `asyncpool/AsyncThreadPoolBankFanOutExecutor`, `AsyncBankCallWorker`
+  - `webclient/WebClientBankFanOutExecutor`
+  - `*/controller/*LoanLimitQueryController` (모드별 submit API)
+- `bank`
+  - `BankApiService` (`buildRequest`, `callApi`, `toEntity`)
+  - `BankApiServiceRegistry`, `ExternalBankApiService`
+
+요약:
+- submit API는 모드별 컨트롤러로 분리되어 있고, 내부에서는 `LoanLimitQueryOrchestrator` 한 곳으로 수렴합니다.
+- polling API는 `LoanLimitBatchRunController` 단일 엔드포인트로 통합되어 있습니다.
 
 ## API
 
@@ -74,11 +84,11 @@ Mock 지연 시뮬레이션 기본값:
 - `app.async-thread-pool.queue-capacity`: 100
 - `app.async-thread-pool.thread-name-prefix`: `loan-limit-async-`
 
-`WebClient` fan-out 설정 기본값:
+가짜 은행 서버 호출 설정 기본값:
 - `app.web-client-fan-out.mock-base-url`: `http://localhost:18080`
 - `app.web-client-fan-out.max-concurrency`: 50
 
-WebClient mode 실행 전, 별도 mock 서버(`loan-limit-mock-server`)를 먼저 띄워야 합니다.
+submit 모드(coroutine/sequential/async-threadpool/webclient) 실행 전, 별도 mock 서버(`loan-limit-mock-server`)를 먼저 띄워야 합니다.
 
 ## 실행 전 준비
 

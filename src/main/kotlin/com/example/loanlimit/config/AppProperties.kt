@@ -4,12 +4,11 @@ import org.springframework.boot.context.properties.ConfigurationProperties
 
 @ConfigurationProperties(prefix = "app")
 data class AppProperties(
-    val lenders: Lenders = Lenders(),
+    val banks: Banks = Banks(),
     val asyncThreadPool: AsyncThreadPool = AsyncThreadPool(),
     val webClientFanOut: WebClientFanOut = WebClientFanOut(),
-    val mock: Mock = Mock(),
 ) {
-    data class Lenders(
+    data class Banks(
         val count: Int = 50,
         val parallelism: Int = 50,
         val perCallTimeoutMs: Long = 5_000,
@@ -26,14 +25,5 @@ data class AppProperties(
     data class WebClientFanOut(
         val mockBaseUrl: String = "http://localhost:8080",
         val maxConcurrency: Int = 50,
-    )
-
-    data class Mock(
-        val minLatencyMs: Long = 3_000,
-        val maxLatencyMs: Long = 15_000,
-        val slowMinLatencyMs: Long = 30_000,
-        val slowMaxLatencyMs: Long = 45_000,
-        val slowLenderCount: Int = 2,
-        val successRatePercent: Int = 85,
     )
 }

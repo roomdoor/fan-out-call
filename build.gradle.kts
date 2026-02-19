@@ -65,3 +65,7 @@ tasks.withType<Test> {
 tasks.withType<org.springframework.boot.gradle.tasks.run.BootRun> {
     jvmArgs("--enable-native-access=ALL-UNNAMED")
 }
+
+springBoot {
+    mainClass.set("com.example.loanlimit.LoanLimitGatewayApplicationKt")
+}

@@ -13,7 +13,7 @@ class OpenApiConfig {
             Info()
                 .title("Loan Limit Gateway API")
                 .description(
-                    "Asynchronous lender fan-out API for loan-limit inquiry. " +
+                    "Asynchronous bank fan-out API for loan-limit inquiry. " +
                         "POST creates a transaction and returns immediately; polling endpoints return progress and results."
                 )
                 .version("v1"),
