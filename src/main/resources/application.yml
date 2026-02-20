@@ -20,7 +20,7 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        include: health,info,metrics
 
 springdoc:
   api-docs:
@@ -36,9 +36,13 @@ app:
     required-completion-ms: 60000
   async-thread-pool:
     core-pool-size: 50
-    max-pool-size: 64
-    queue-capacity: 100
+    max-pool-size: 128
+    queue-capacity: 1000
     thread-name-prefix: loan-limit-async-
   web-client-fan-out:
     mock-base-url: http://localhost:18080
+    routing-mode: sharded
+    sharded-mock-routing:
+      base-port: 18000
+      shard-count: 10
     max-concurrency: 50

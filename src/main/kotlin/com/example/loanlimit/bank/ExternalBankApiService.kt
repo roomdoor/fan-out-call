@@ -4,6 +4,7 @@ import com.example.loanlimit.config.AppProperties
 import com.example.loanlimit.bankcallresult.dto.MockExternalCallResult
 import com.example.loanlimit.bankcallresult.entity.BankCallResult
 import com.example.loanlimit.loanlimitbatchrun.dto.request.LoanLimitQueryRequest
+import kotlinx.coroutines.reactor.awaitSingle
 import org.springframework.web.reactive.function.client.WebClient
 import java.time.Duration
 import java.time.LocalDateTime
@@ -13,9 +14,13 @@ class ExternalBankApiService(
     private val appProperties: AppProperties,
     private val webClientBuilder: WebClient.Builder,
 ) : BankApiService {
+    private val mockBaseUrl: String by lazy {
+        appProperties.webClientFanOut.resolveMockBaseUrl(bankCode)
+    }
+
     private val webClient: WebClient by lazy {
         webClientBuilder
-            .baseUrl(appProperties.webClientFanOut.mockBaseUrl)
+            .baseUrl(mockBaseUrl)
             .build()
     }
 
@@ -37,6 +42,19 @@ class ExternalBankApiService(
             ?: error("Empty response from fake bank server bankCode=$bankCode")
     }
 
+    override suspend fun callApiNonBlocking(
+        request: LoanLimitQueryRequest,
+        requestPayload: String,
+    ): MockExternalCallResult {
+        return webClient.post()
+            .uri("/api/v1/mock-external/banks/{bankCode}/loan-limit", bankCode)
+            .bodyValue(request)
+            .retrieve()
+            .bodyToMono(MockExternalCallResult::class.java)
+            .timeout(Duration.ofMillis(appProperties.banks.perCallTimeoutMs))
+            .awaitSingle()
+    }
+
     override fun toEntity(
         runId: Long,
         requestPayload: String,
@@ -50,7 +68,7 @@ class ExternalBankApiService(
         return BankCallResult(
             runId = runId,
             bankCode = bankCode,
-            host = appProperties.webClientFanOut.mockBaseUrl,
+            host = mockBaseUrl,
             url = "/api/v1/mock-external/banks/$bankCode/loan-limit",
             httpStatus = response.httpStatus,
             success = success,

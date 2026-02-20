@@ -15,6 +15,13 @@ interface BankApiService {
         requestPayload: String,
     ): MockExternalCallResult
 
+    suspend fun callApiNonBlocking(
+        request: LoanLimitQueryRequest,
+        requestPayload: String,
+    ): MockExternalCallResult {
+        return callApi(request, requestPayload)
+    }
+
     fun toEntity(
         runId: Long,
         requestPayload: String,

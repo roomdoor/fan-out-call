@@ -6,13 +6,15 @@ import com.example.loanlimit.bankcallresult.dto.MockExternalCallResult
 import com.example.loanlimit.bankcallresult.entity.BankCallResult
 import com.example.loanlimit.loanlimitbatchrun.dto.request.LoanLimitQueryRequest
 import com.example.loanlimit.bank.BankApiServiceRegistry
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.reactor.awaitSingleOrNull
+import kotlinx.coroutines.reactor.mono
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Component
 import org.springframework.web.reactive.function.client.WebClient
+import org.springframework.web.reactive.function.client.bodyToMono
 import reactor.core.publisher.Flux
 import reactor.core.publisher.Mono
-import reactor.core.scheduler.Schedulers
 import java.time.Duration
 import java.time.Instant
 import java.time.LocalDateTime
@@ -24,9 +26,7 @@ class WebClientBankFanOutExecutor(
     private val bankApiServiceRegistry: BankApiServiceRegistry,
 ) : BankFanOutExecutor {
     private val webClient: WebClient by lazy {
-        webClientBuilder
-            .baseUrl(appProperties.webClientFanOut.mockBaseUrl)
-            .build()
+        webClientBuilder.build()
     }
 
     override suspend fun execute(
@@ -46,14 +46,12 @@ class WebClientBankFanOutExecutor(
                 { bank -> callSingleBank(runId, bank, request) },
                 appProperties.webClientFanOut.maxConcurrency,
             )
-            .publishOn(Schedulers.boundedElastic())
-            .doOnNext { result ->
-                runBlocking {
-                    onEachResult(result)
-                }
-            }
+            .flatMap(
+                { result -> mono(Dispatchers.IO) { onEachResult(result) } },
+                appProperties.webClientFanOut.maxConcurrency,
+            )
             .then()
-            .block()
+            .awaitSingleOrNull()
 
         log.info("WebClient fan-out finished runId=$runId bankCount=${banks.size}")
     }
@@ -64,15 +62,17 @@ class WebClientBankFanOutExecutor(
         request: LoanLimitQueryRequest,
     ): Mono<BankCallResult> {
         val bankService = bankApiServiceRegistry.get(bankCode)
+        val mockBaseUrl = appProperties.webClientFanOut.resolveMockBaseUrl(bankCode)
+        val bankApiPath = "/api/v1/mock-external/banks/$bankCode/loan-limit"
         val requestedAt = LocalDateTime.now()
         val started = Instant.now()
         val requestPayload = bankService.buildRequest(request)
 
         return webClient.post()
-            .uri("/api/v1/mock-external/banks/{bankCode}/loan-limit", bankCode)
+            .uri("$mockBaseUrl$bankApiPath")
             .bodyValue(request)
             .retrieve()
-            .bodyToMono(MockExternalCallResult::class.java)
+            .bodyToMono<MockExternalCallResult>()
             .timeout(Duration.ofMillis(appProperties.banks.perCallTimeoutMs))
             .map { response ->
                 bankService.toEntity(
@@ -95,8 +95,8 @@ class WebClientBankFanOutExecutor(
                     BankCallResult(
                         runId = runId,
                         bankCode = bankCode,
-                        host = appProperties.webClientFanOut.mockBaseUrl,
-                        url = "/api/v1/mock-external/banks/$bankCode/loan-limit",
+                        host = mockBaseUrl,
+                        url = bankApiPath,
                         httpStatus = null,
                         success = false,
                         responseCode = "EXCEPTION",

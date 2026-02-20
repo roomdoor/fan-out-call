@@ -62,7 +62,7 @@ class CoroutineBankFanOutExecutor(
 
         return try {
             val response = withTimeout(appProperties.banks.perCallTimeoutMs) {
-                bankService.callApi(request, requestPayload)
+                bankService.callApiNonBlocking(request, requestPayload)
             }
 
             bankService.toEntity(
