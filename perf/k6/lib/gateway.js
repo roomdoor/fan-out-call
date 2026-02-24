@@ -5,9 +5,13 @@ import { BASE_URL, getSubmitEndpoint, POLL_MIN_MS, POLL_MAX_MS, MAX_WAIT_MS } fr
 export function submit(mode, request) {
   const url = `${BASE_URL}${getSubmitEndpoint(mode)}`;
   const payload = JSON.stringify(request);
+  const borrowerId = request.borrowerId;
   
   const response = http.post(url, payload, {
-    headers: { 'Content-Type': 'application/json' }
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Borrower-Id': borrowerId,
+    }
   });
   
   check(response, {
@@ -34,9 +38,13 @@ export function submit(mode, request) {
   return parsed;
 }
 
-export function poll(transactionNo) {
+export function poll(transactionNo, borrowerId) {
   const url = `${BASE_URL}/api/v1/loan-limit/queries/number/${transactionNo}`;
-  return http.get(url);
+  return http.get(url, {
+    headers: {
+      'X-Borrower-Id': borrowerId,
+    },
+  });
 }
 
 export function isTerminal(response) {
@@ -48,13 +56,13 @@ export function isTerminal(response) {
   }
 }
 
-export function pollUntilTerminal(transactionNo, maxWaitMs = MAX_WAIT_MS) {
+export function pollUntilTerminal(transactionNo, borrowerId, maxWaitMs = MAX_WAIT_MS) {
   const startTime = Date.now();
   let waitTime = POLL_MIN_MS;
   let pollCount = 0;
   
   while (Date.now() - startTime < maxWaitMs) {
-    const response = poll(transactionNo);
+    const response = poll(transactionNo, borrowerId);
     pollCount++;
     
     if (isTerminal(response)) {

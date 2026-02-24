@@ -21,24 +21,13 @@ class BankCallResultService(
                     callResultRepository.save(result)
                 }
                 if (attempt > 1) {
-                    log.info(
-                        "Result persist recovered after retry runId=${result.runId} bankCode=${result.bankCode} " +
-                            "attempt=$attempt",
-                    )
+                    log.info("Result persist recovered after retry attempt=$attempt")
                 }
                 return
             } catch (e: TransientDataAccessException) {
-                log.warn(
-                    "Transient DB error while persisting result runId=${result.runId} bankCode=${result.bankCode} " +
-                        "attempt=$attempt maxAttempts=$MAX_PERSIST_RETRY_ATTEMPTS",
-                    e,
-                )
+                log.warn("Transient DB error while persisting result attempt=$attempt maxAttempts=$MAX_PERSIST_RETRY_ATTEMPTS", e)
                 if (attempt >= MAX_PERSIST_RETRY_ATTEMPTS) {
-                    log.error(
-                        "Result persist retry exhausted runId=${result.runId} bankCode=${result.bankCode} " +
-                            "attempts=$attempt",
-                        e,
-                    )
+                    log.error("Result persist retry exhausted attempts=$attempt", e)
                     throw e
                 }
                 delay(RETRY_BACKOFF_MS * attempt)

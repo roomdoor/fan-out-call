@@ -2,16 +2,20 @@ package com.example.loanlimit.loanlimitbatchrun.service
 
 import com.example.loanlimit.config.AppProperties
 import com.example.loanlimit.bankcallresult.repository.BankCallResultRepository
+import com.example.loanlimit.loanlimitbatchrun.dto.request.LoanLimitQueryRequest
 import com.example.loanlimit.loanlimitbatchrun.dto.response.LoanLimitQueryResponse
 import com.example.loanlimit.loanlimitbatchrun.entity.LoanLimitBatchRun
 import com.example.loanlimit.loanlimitbatchrun.entity.RunStatus
+import com.example.loanlimit.logging.MdcKeys
 import com.example.loanlimit.loanlimitbatchrun.repository.LoanLimitBatchRunRepository
+import org.slf4j.MDC
 import org.slf4j.LoggerFactory
 import org.springframework.http.HttpStatus
 import org.springframework.stereotype.Service
 import org.springframework.web.server.ResponseStatusException
 import java.time.Duration
 import java.time.LocalDateTime
+import java.util.UUID
 
 @Service
 class LoanLimitBatchRunService(
@@ -19,9 +23,30 @@ class LoanLimitBatchRunService(
     private val batchRunRepository: LoanLimitBatchRunRepository,
     private val callResultRepository: BankCallResultRepository,
 ) {
-    fun getByTransactionId(transactionId: String): LoanLimitQueryResponse {
-        val runEntity = batchRunRepository.findByRequestId(transactionId)
-            ?: throw ResponseStatusException(HttpStatus.NOT_FOUND, "Transaction not found: $transactionId")
+    fun createRunAndSetMdc(
+        request: LoanLimitQueryRequest,
+        requestedBankCount: Int,
+    ): LoanLimitBatchRun {
+        val requestId = UUID.randomUUID().toString()
+        val runEntity = batchRunRepository.save(
+            LoanLimitBatchRun(
+                requestId = requestId,
+                borrowerId = request.borrowerId,
+                requestedBankCount = requestedBankCount,
+                status = RunStatus.IN_PROGRESS,
+                startedAt = LocalDateTime.now(),
+            ),
+        )
+
+        MDC.put(MdcKeys.BORROWER_ID, request.borrowerId)
+        MDC.put(MdcKeys.RUN_ID, (runEntity.id ?: 0L).toString())
+
+        return runEntity
+    }
+
+    fun getByRequestId(requestId: String): LoanLimitQueryResponse {
+        val runEntity = batchRunRepository.findByRequestId(requestId)
+            ?: throw ResponseStatusException(HttpStatus.NOT_FOUND, "Request not found: $requestId")
         return response(runEntity)
     }
 
@@ -51,10 +76,7 @@ class LoanLimitBatchRunService(
         runEntity.finishedAt = LocalDateTime.now()
         batchRunRepository.save(runEntity)
 
-        log.info(
-            "Background fan-out completed runId=$runId status=$status completedCount=$completedCount " +
-                "successCount=$successCount failureCount=$failureCount",
-        )
+        log.info("Background fan-out completed status=$status completedCount=$completedCount successCount=$successCount failureCount=$failureCount")
     }
 
     fun markRunFailed(runId: Long, reason: String?) {
@@ -69,10 +91,7 @@ class LoanLimitBatchRunService(
         runEntity.finishedAt = LocalDateTime.now()
         batchRunRepository.save(runEntity)
 
-        log.warn(
-            "Run marked as FAILED runId=$runId completedCount=$completedCount successCount=$successCount " +
-                "failureCount=$failureCount reason=$reason",
-        )
+        log.warn("Run marked as FAILED completedCount=$completedCount successCount=$successCount failureCount=$failureCount reason=$reason")
     }
 
     private fun response(runEntity: LoanLimitBatchRun): LoanLimitQueryResponse {

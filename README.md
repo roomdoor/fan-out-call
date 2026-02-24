@@ -16,7 +16,7 @@ Spring Boot + Kotlin + MySQL 기반의 대출 한도 조회 외부 API 호출용
 - `loanLimitBatchRun`
   - `controller/LoanLimitBatchRunController`: 통합 polling API
   - `service/LoanLimitQueryOrchestrator`: submit 공통 처리 + 백그라운드 fan-out 실행 오케스트레이션
-  - `service/LoanLimitBatchRunService`: run 상태 완료/실패 처리 + transactionId/transactionNo 조회
+- `service/LoanLimitBatchRunService`: run 상태 완료/실패 처리 + requestId/transactionNo 조회
   - `repository/LoanLimitBatchRunRepository`
   - `dto/request|response`, `entity`
 - `bankCallResult`
@@ -60,7 +60,7 @@ Spring Boot + Kotlin + MySQL 기반의 대출 한도 조회 외부 API 호출용
 
 ### Unified Polling (All Modes)
 
-- `GET /api/v1/loan-limit/queries/{transactionId}`
+- `GET /api/v1/loan-limit/queries/request/{requestId}`
 - `GET /api/v1/loan-limit/queries/number/{transactionNo}`
 
 예시 요청 바디:
@@ -74,9 +74,9 @@ Spring Boot + Kotlin + MySQL 기반의 대출 한도 조회 외부 API 호출용
 ```
 
 이 API는 `202 Accepted`를 즉시 반환하고, 외부 API fan-out은 백그라운드에서 진행됩니다.
-응답에는 `transactionNo`(유니크 번호), `transactionId`(UUID), 진행 상태(`status`), 진행 카운트(`successCount`, `failureCount`, `completedCount`)가 포함됩니다.
+응답에는 `transactionNo`(유니크 번호), `requestId`(UUID), 진행 상태(`status`), 진행 카운트(`successCount`, `failureCount`, `completedCount`)가 포함됩니다.
 진행 중에는 `finishedAt`이 `null`이고 `results`는 비어 있을 수 있습니다.
-이후 조회 API에서 `transactionNo` 또는 `transactionId`로 polling 조회합니다.
+이후 조회 API에서 `transactionNo` 또는 `requestId`로 polling 조회합니다.
 
 `@Async + ThreadPool` 설정 기본값:
 - `app.async-thread-pool.core-pool-size`: 50

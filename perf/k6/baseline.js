@@ -27,33 +27,25 @@ export function setup() {
 }
 
 export default function() {
-  const submitResponse = submit(MODE, buildLoanLimitRequest(MODE));
-  
-  check(submitResponse, {
-    'submit returns transactionNo': (r) => r.transactionNo !== undefined && r.transactionNo !== null
-  });
-  
-  const pollResult = pollUntilTerminal(submitResponse.transactionNo, MAX_WAIT_MS);
-  
+  const request = buildLoanLimitRequest(MODE);
+  const submitResponse = submit(MODE, request);
+
+  check(submitResponse, {'submit returns transactionNo': (r) => r.transactionNo !== undefined && r.transactionNo !== null});
+
+  const pollResult = pollUntilTerminal(submitResponse.transactionNo, request.borrowerId, MAX_WAIT_MS);
+
   pollsPerTransaction.add(pollResult.pollCount);
   e2eCompletionTime.add(pollResult.duration);
   timeoutWaitingRate.add(pollResult.timedOut);
-  
-  check(pollResult, {
-    'transaction completed without timeout': (r) => !r.timedOut,
-    'terminal status received': (r) => r.response !== null
-  });
-  
+
+  check(pollResult, {'transaction completed without timeout': (r) => !r.timedOut, 'terminal status received': (r) => r.response !== null});
+
   if (!pollResult.timedOut) {
     const body = JSON.parse(pollResult.response.body);
-    check(body, {
-      'completed count equals requested count': (b) => b.completedCount === b.requestedBankCount
-    });
+    check(body, {'completed count equals requested count': (b) => b.completedCount === b.requestedBankCount});
   }
 }
 
 export function handleSummary(data) {
-  return {
-    'summary.json': JSON.stringify(data, null, 2),
-  };
+  return {'summary.json': JSON.stringify(data, null, 2),};
 }

@@ -3,25 +3,25 @@ package com.example.loanlimit.loanlimitbatchrun.service
 import com.example.loanlimit.bankcallresult.service.BankCallResultService
 import com.example.loanlimit.loanlimitbatchrun.dto.request.LoanLimitQueryRequest
 import com.example.loanlimit.loanlimitbatchrun.dto.response.LoanLimitQueryResponse
-import com.example.loanlimit.loanlimitbatchrun.entity.LoanLimitBatchRun
-import com.example.loanlimit.loanlimitbatchrun.entity.RunStatus
 import com.example.loanlimit.fanout.BankFanOutExecutor
 import com.example.loanlimit.fanout.BankFanOutExecutorRegistry
 import com.example.loanlimit.bankcallresult.service.BankCatalogService
-import com.example.loanlimit.loanlimitbatchrun.repository.LoanLimitBatchRunRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.slf4j.MDCContext
 import org.slf4j.LoggerFactory
+import org.slf4j.MDC
+import org.springframework.http.HttpStatus
 import org.springframework.stereotype.Service
-import java.time.LocalDateTime
-import java.util.UUID
+import org.springframework.web.server.ResponseStatusException
+import com.example.loanlimit.logging.MdcKeys
+import com.example.loanlimit.logging.restoreMdc
 
 @Service
 class LoanLimitQueryOrchestrator(
     private val bankCatalogService: BankCatalogService,
-    private val batchRunRepository: LoanLimitBatchRunRepository,
     private val bankCallResultService: BankCallResultService,
     private val loanLimitBatchRunService: LoanLimitBatchRunService,
     private val bankFanOutExecutorRegistry: BankFanOutExecutorRegistry,
@@ -48,22 +48,21 @@ class LoanLimitQueryOrchestrator(
         request: LoanLimitQueryRequest,
         modeName: String,
     ): LoanLimitQueryResponse {
+        validateBorrowerId(request)
+
+        val prevMdc = MDC.getCopyOfContextMap()
+
         val fanOutExecutor = bankFanOutExecutorRegistry.get(modeName)
         val banks = bankCatalogService.getAll()
-        val runEntity = batchRunRepository.save(
-            LoanLimitBatchRun(
-                requestId = UUID.randomUUID().toString(),
-                borrowerId = request.borrowerId,
-                requestedBankCount = banks.size,
-                status = RunStatus.IN_PROGRESS,
-                startedAt = LocalDateTime.now(),
-            ),
+        val runEntity = loanLimitBatchRunService.createRunAndSetMdc(
+            request = request,
+            requestedBankCount = banks.size,
         )
 
         val runId = runEntity.id ?: 0L
-        log.info("Loan-limit query accepted runId=$runId transactionId=${runEntity.requestId} borrowerId=${request.borrowerId} bankCount=${banks.size} mode=$modeName")
+        log.info("Loan-limit query accepted bankCount=${banks.size} mode=$modeName")
 
-        backgroundScope.launch {
+        backgroundScope.launch(MDCContext()) {
             processInBackground(
                 runId = runId,
                 banks = banks,
@@ -73,7 +72,18 @@ class LoanLimitQueryOrchestrator(
             )
         }
 
-        return LoanLimitQueryResponse.from(runEntity = runEntity)
+        return try {
+            LoanLimitQueryResponse.from(runEntity = runEntity)
+        } finally {
+            restoreMdc(prevMdc)
+        }
+    }
+
+    private fun validateBorrowerId(request: LoanLimitQueryRequest) {
+        val borrowerIdFromHeader = MDC.get(MdcKeys.BORROWER_ID)
+        if (borrowerIdFromHeader != request.borrowerId) {
+            throw ResponseStatusException(HttpStatus.BAD_REQUEST, "borrowerId mismatch")
+        }
     }
 
     private suspend fun processInBackground(
@@ -84,7 +94,7 @@ class LoanLimitQueryOrchestrator(
         modeName: String,
     ) {
         try {
-            log.info("Background fan-out started runId=$runId borrowerId=${request.borrowerId} bankCount=${banks.size} mode=$modeName")
+            log.info("Background fan-out started bankCount=${banks.size} mode=$modeName")
 
             fanOutExecutor.execute(
                 runId = runId,
@@ -96,7 +106,7 @@ class LoanLimitQueryOrchestrator(
 
             loanLimitBatchRunService.finalizeRunStatus(runId)
         } catch (e: Exception) {
-            log.error("Background fan-out failed runId=$runId", e)
+            log.error("Background fan-out failed", e)
             loanLimitBatchRunService.markRunFailed(runId, e.message)
         }
     }

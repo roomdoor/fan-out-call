@@ -28,6 +28,10 @@ springdoc:
   swagger-ui:
     path: /swagger-ui.html
 
+logging:
+  pattern:
+    console: "%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX} [%-5level] [%thread] [runId=%-10.10X{runId} borrowerId=%-20.20X{borrowerId} bankCode=%-8.8X{bankCode}] %logger{36} : %msg%n"
+
 app:
   banks:
     count: 50

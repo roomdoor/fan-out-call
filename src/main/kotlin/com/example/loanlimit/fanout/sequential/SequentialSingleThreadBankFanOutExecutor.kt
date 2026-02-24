@@ -9,11 +9,14 @@ import jakarta.annotation.PreDestroy
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.slf4j.MDCContext
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Component
 import java.time.Duration
 import java.time.Instant
 import java.time.LocalDateTime
+import com.example.loanlimit.logging.MdcKeys
+import org.slf4j.MDC
 import java.util.concurrent.Executors
 
 @Component
@@ -32,19 +35,22 @@ class SequentialSingleThreadBankFanOutExecutor(
         request: LoanLimitQueryRequest,
         onEachResult: suspend (BankCallResult) -> Unit,
     ) {
+        val baseMdc = MDC.getCopyOfContextMap() ?: emptyMap()
         log.info(
-            "Sequential fan-out execution started runId=$runId bankCount=${banks.size} " +
+            "Sequential fan-out execution started bankCount=${banks.size} " +
                 "singleThread=loan-limit-sequential-fanout perCallTimeoutMs=${appProperties.banks.perCallTimeoutMs}",
         )
 
         withContext(singleThreadDispatcher) {
             for (bank in banks) {
                 val result = executeSingleCall(runId, bank, request)
-                onEachResult(result)
+                withContext(MDCContext(baseMdc + mapOf(MdcKeys.BANK_CODE to bank))) {
+                    onEachResult(result)
+                }
             }
         }
 
-        log.info("Sequential fan-out execution finished runId=$runId bankCount=${banks.size}")
+        log.info("Sequential fan-out execution finished bankCount=${banks.size}")
     }
 
     private suspend fun executeSingleCall(
@@ -72,10 +78,7 @@ class SequentialSingleThreadBankFanOutExecutor(
             )
         } catch (e: Exception) {
             val latencyMs = Duration.between(started, Instant.now()).toMillis()
-            log.warn(
-                "Bank call failed runId=$runId bankCode=$bankCode latencyMs=$latencyMs " +
-                    "errorType=${e::class.simpleName} message=${e.message}",
-            )
+            log.warn("Bank call failed latencyMs=$latencyMs errorType=${e::class.simpleName} message=${e.message}")
 
             BankCallResult(
                 runId = runId,

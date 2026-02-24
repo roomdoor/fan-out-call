@@ -3,6 +3,7 @@ export const MODE = __ENV.MODE;
 export const MAX_WAIT_MS = parseInt(__ENV.MAX_WAIT_MS || '60000');
 export const POLL_MIN_MS = parseInt(__ENV.POLL_MIN_MS || '100');
 export const POLL_MAX_MS = parseInt(__ENV.POLL_MAX_MS || '5000');
+export const RUN_ID = __ENV.RUN_ID || `k6-run-${Date.now()}`;
 
 const modeEndpoints = {
   coroutine: '/api/v1/loan-limit/coroutine/queries',
@@ -24,6 +25,7 @@ export function logConfig() {
   console.log(`BASE_URL: ${BASE_URL}`);
   console.log(`MODE: ${MODE}`);
   console.log(`MAX_WAIT_MS: ${MAX_WAIT_MS}`);
+  console.log(`RUN_ID: ${RUN_ID}`);
 }
 
 export function buildBorrowerId(mode) {

@@ -9,6 +9,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.slf4j.MDCContext
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeout
@@ -17,6 +19,8 @@ import org.springframework.stereotype.Component
 import java.time.Duration
 import java.time.Instant
 import java.time.LocalDateTime
+import com.example.loanlimit.logging.MdcKeys
+import org.slf4j.MDC
 
 @Component
 class CoroutineBankFanOutExecutor(
@@ -30,8 +34,9 @@ class CoroutineBankFanOutExecutor(
         onEachResult: suspend (BankCallResult) -> Unit,
     ) {
         val semaphore = Semaphore(appProperties.banks.parallelism)
+        val baseMdc = MDC.getCopyOfContextMap() ?: emptyMap()
         log.info(
-            "Fan-out execution started runId=$runId bankCount=${banks.size} " +
+            "Fan-out execution started bankCount=${banks.size} " +
                 "parallelism=${appProperties.banks.parallelism} " +
                 "perCallTimeoutMs=${appProperties.banks.perCallTimeoutMs}",
         )
@@ -39,15 +44,15 @@ class CoroutineBankFanOutExecutor(
         coroutineScope {
             banks.map { bank ->
                 async(Dispatchers.IO) {
-                    val result = semaphore.withPermit {
-                        executeSingleCall(runId, bank, request)
+                    withContext(MDCContext(baseMdc + mapOf(MdcKeys.BANK_CODE to bank))) {
+                        val result = semaphore.withPermit { executeSingleCall(runId, bank, request) }
+                        onEachResult(result)
                     }
-                    onEachResult(result)
                 }
             }.awaitAll()
         }
 
-        log.info("Fan-out execution finished runId=$runId bankCount=${banks.size}")
+        log.info("Fan-out execution finished bankCount=${banks.size}")
     }
 
     private suspend fun executeSingleCall(
@@ -59,11 +64,12 @@ class CoroutineBankFanOutExecutor(
         val requestedAt = LocalDateTime.now()
         val started = Instant.now()
         val requestPayload = bankService.buildRequest(request)
-
         return try {
             val response = withTimeout(appProperties.banks.perCallTimeoutMs) {
                 bankService.callApiNonBlocking(request, requestPayload)
             }
+
+            val latencyMs = Duration.between(started, Instant.now()).toMillis()
 
             bankService.toEntity(
                 runId = runId,
@@ -71,14 +77,11 @@ class CoroutineBankFanOutExecutor(
                 response = response,
                 requestedAt = requestedAt,
                 respondedAt = LocalDateTime.now(),
-                latencyMs = Duration.between(started, Instant.now()).toMillis(),
+                latencyMs = latencyMs,
             )
         } catch (e: Exception) {
             val latencyMs = Duration.between(started, Instant.now()).toMillis()
-            log.warn(
-                "Bank call failed runId=$runId bankCode=$bankCode latencyMs=$latencyMs " +
-                    "errorType=${e::class.simpleName} message=${e.message}",
-            )
+            log.warn("Bank call failed latencyMs=$latencyMs errorType=${e::class.simpleName} message=${e.message}")
 
             BankCallResult(
                 runId = runId,

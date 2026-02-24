@@ -18,13 +18,14 @@ export function setup() {
 }
 
 export default function() {
-  const submitResponse = submit(MODE, buildLoanLimitRequest(MODE));
+  const request = buildLoanLimitRequest(MODE);
+  const submitResponse = submit(MODE, request);
   
   check(submitResponse, {
     'submit returns transactionNo': (r) => r.transactionNo !== undefined && r.transactionNo !== null
   });
   
-  const pollResult = pollUntilTerminal(submitResponse.transactionNo);
+  const pollResult = pollUntilTerminal(submitResponse.transactionNo, request.borrowerId);
   
   pollsPerTransaction.add(pollResult.pollCount);
   e2eCompletionTime.add(pollResult.duration);

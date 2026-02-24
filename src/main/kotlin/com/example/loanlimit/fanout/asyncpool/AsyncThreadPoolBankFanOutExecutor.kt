@@ -23,7 +23,7 @@ class AsyncThreadPoolBankFanOutExecutor(
         onEachResult: suspend (BankCallResult) -> Unit,
     ) {
         log.info(
-            "Async-threadpool fan-out started runId=$runId bankCount=${banks.size} " +
+            "Async-threadpool fan-out started bankCount=${banks.size} " +
                 "corePoolSize=${appProperties.asyncThreadPool.corePoolSize} " +
                 "maxPoolSize=${appProperties.asyncThreadPool.maxPoolSize} " +
                 "queueCapacity=${appProperties.asyncThreadPool.queueCapacity} " +
@@ -43,7 +43,7 @@ class AsyncThreadPoolBankFanOutExecutor(
             CompletableFuture.allOf(*completionFutures.toTypedArray()).join()
         }
 
-        log.info("Async-threadpool fan-out finished runId=$runId bankCount=${banks.size}")
+        log.info("Async-threadpool fan-out finished bankCount=${banks.size}")
     }
 
     companion object {

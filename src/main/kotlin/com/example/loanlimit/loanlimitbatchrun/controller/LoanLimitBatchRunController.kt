@@ -16,21 +16,21 @@ import org.springframework.web.bind.annotation.RestController
 class LoanLimitBatchRunController(
     private val loanLimitBatchRunService: LoanLimitBatchRunService,
 ) {
-    @GetMapping("/queries/{transactionId}")
-    @Operation(summary = "Get progress/result by transactionId")
-    fun getByTransactionId(
-        @Parameter(description = "UUID transaction identifier from any mode submit endpoint")
-        @PathVariable transactionId: String,
+    @GetMapping("/queries/request/{requestId}")
+    @Operation(summary = "Get progress/result by requestId")
+    fun getByRequestId(
+        @Parameter(description = "UUID request identifier from any mode submit endpoint")
+        @PathVariable requestId: String,
     ): LoanLimitQueryResponse {
-        return loanLimitBatchRunService.getByTransactionId(transactionId)
+        return loanLimitBatchRunService.getByRequestId(requestId)
     }
 
-    @GetMapping("/queries/number/{transactionNo}")
+    @GetMapping("/queries/number/{runId}")
     @Operation(summary = "Get progress/result by transactionNo")
     fun getByTransactionNo(
         @Parameter(description = "Numeric transaction identifier from any mode submit endpoint")
-        @PathVariable transactionNo: Long,
+        @PathVariable runId: Long,
     ): LoanLimitQueryResponse {
-        return loanLimitBatchRunService.getByTransactionNo(transactionNo)
+        return loanLimitBatchRunService.getByTransactionNo(runId)
     }
 }

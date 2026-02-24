@@ -9,8 +9,8 @@ import java.time.LocalDateTime
 data class LoanLimitQueryResponse(
     @field:Schema(description = "Numeric transaction identifier", example = "101")
     val transactionNo: Long,
-    @field:Schema(description = "UUID transaction identifier", example = "f6adff79-9be4-4d48-a6cc-4e87f5ff7fb7")
-    val transactionId: String,
+    @field:Schema(description = "UUID request identifier", example = "f6adff79-9be4-4d48-a6cc-4e87f5ff7fb7")
+    val requestId: String,
     @field:Schema(description = "Run status", example = "IN_PROGRESS")
     val status: String,
     @field:Schema(description = "Total bank APIs to process", example = "50")
@@ -41,7 +41,7 @@ data class LoanLimitQueryResponse(
         ): LoanLimitQueryResponse {
             return LoanLimitQueryResponse(
                 transactionNo = runEntity.id ?: 0L,
-                transactionId = runEntity.requestId,
+                requestId = runEntity.requestId,
                 status = runEntity.status.name,
                 requestedBankCount = runEntity.requestedBankCount,
                 successCount = successCount,
