@@ -3,7 +3,8 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MOCK_SERVER_DIR="/Users/sihwa/IdeaProjects/loan-limit-mock-server"
+MOCK_SERVER_DIR="${MOCK_SERVER_DIR:?MOCK_SERVER_DIR is not set. Example: export MOCK_SERVER_DIR=/path/to/fan-out-api-mock-server}"
+export MOCK_SERVER_DIR
 
 echo "=== Mock Fleet Harness (loan-limit-mock-server) ==="
 echo ""
@@ -18,10 +19,11 @@ show_usage() {
   echo "  full     - up + run + down (mock fleet only)"
   echo ""
   echo "Environment Variables:"
-  echo "  PROFILE    - baseline | stress | smoke | journey"
-  echo "  MOCK_PROFILE - baseline | stress (used for mock fleet; default: baseline)"
-  echo "  MODE       - coroutine | async-threadpool | webclient"
-  echo "  BASE_URL   - Gateway base URL (default: http://localhost:8080)"
+  echo "  MOCK_SERVER_DIR - Path to fan-out-api-mock-server repo (required)"
+  echo "  PROFILE         - baseline | stress | smoke | journey"
+  echo "  MOCK_PROFILE    - baseline | stress (used for mock fleet; default: baseline)"
+  echo "  MODE            - coroutine | async-threadpool | webclient"
+  echo "  BASE_URL        - Gateway base URL (default: http://localhost:8080)"
   echo ""
   echo "Examples:"
   echo "  MOCK_PROFILE=baseline ./harness.sh up"

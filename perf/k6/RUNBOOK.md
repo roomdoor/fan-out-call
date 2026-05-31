@@ -24,6 +24,16 @@ node --version
 
 ## Quick Start
 
+### 0. Set Required Environment Variables
+
+The harness needs to know where the `fan-out-api-mock-server` repo lives:
+
+```bash
+export MOCK_SERVER_DIR=/path/to/fan-out-api-mock-server
+```
+
+Put this in your shell rc (`~/.zshrc` etc.) or a `.envrc` to persist it.
+
 ### 1. Start Mock Fleet
 
 ```bash
@@ -149,7 +159,7 @@ app:
 
 ### Baseline Profile
 
-Located at `/Users/sihwa/IdeaProjects/loan-limit-mock-server/perf/baseline.env`:
+Located at `${MOCK_SERVER_DIR}/perf/baseline.env`:
 
 ```bash
 MOCK_MIN_LATENCY_MS=500
@@ -160,7 +170,7 @@ MOCK_SUCCESS_RATE_PERCENT=100
 
 ### Stress Profile
 
-Located at `/Users/sihwa/IdeaProjects/loan-limit-mock-server/perf/stress.env`:
+Located at `${MOCK_SERVER_DIR}/perf/stress.env`:
 
 ```bash
 MOCK_MIN_LATENCY_MS=3000
@@ -302,12 +312,12 @@ Start infrastructure manually:
 docker-compose up -d mysql
 
 # 2. Start mock fleet
-cd /Users/sihwa/IdeaProjects/loan-limit-mock-server/perf
+cd "${MOCK_SERVER_DIR}/perf"
 source baseline.env
 docker-compose up -d
 
 # 3. Start gateway (with sharded routing)
-cd /Users/sihwa/IdeaProjects/loan-limit-gateway
+cd "${GATEWAY_DIR}"
 ./gradlew bootRun --args='--app.web-client-fan-out.routing-mode=sharded'
 
 # 4. Run test
@@ -319,12 +329,12 @@ MODE=coroutine k6 run baseline.js
 
 Gateway logs:
 ```bash
-tail -f /Users/sihwa/IdeaProjects/loan-limit-gateway/build/logs/*.log
+tail -f "${GATEWAY_DIR}/build/logs/"*.log
 ```
 
 Mock fleet logs:
 ```bash
-cd /Users/sihwa/IdeaProjects/loan-limit-mock-server/perf
+cd "${MOCK_SERVER_DIR}/perf"
 docker-compose logs -f mock-bank-00
 ```
 
@@ -349,4 +359,4 @@ docker-compose logs -f mock-bank-00
 - [Benchmark Spec](../../.sisyphus/perf/BENCHMARK_SPEC.md)
 - [k6 Documentation](https://k6.io/docs/)
 - [Gateway README](../../../README.md)
-- [Mock Server README](/Users/sihwa/IdeaProjects/loan-limit-mock-server/README.md)
+- [Mock Server README](${MOCK_SERVER_DIR}/README.md)

@@ -215,7 +215,7 @@ PY
 
 echo "Collecting run metadata..."
 collect_git_info "${GATEWAY_DIR}" "${EVIDENCE_DIR}/gateway-git.json"
-collect_git_info "/Users/sihwa/IdeaProjects/loan-limit-mock-server" "${EVIDENCE_DIR}/mockserver-git.json"
+collect_git_info "${MOCK_SERVER_DIR:-}" "${EVIDENCE_DIR}/mockserver-git.json"
 collect_config "${EVIDENCE_DIR}/config.json"
 collect_host_info "${EVIDENCE_DIR}/host.json"
 
