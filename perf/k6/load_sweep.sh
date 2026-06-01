@@ -17,6 +17,7 @@ POOL="${POOL:-512}"
 QUEUE="${QUEUE:-2048}"
 CORE_POOL="${CORE_POOL:-${POOL}}"
 MAX_POOL="${MAX_POOL:-${POOL}}"
+HIKARI_MAX_POOL="${HIKARI_MAX_POOL:-10}"
 DURATION="${DURATION:-2m}"
 GATEWAY_PORT="${GATEWAY_PORT:-8080}"
 BASE_URL="http://localhost:${GATEWAY_PORT}"
@@ -57,7 +58,7 @@ run_one() {
 
   echo ""
   echo "========================================================"
-  echo "==  Load: ${rpm} RPM (core=${CORE_POOL}, max=${MAX_POOL}, queue=${QUEUE}, duration=${DURATION})"
+  echo "==  Load: ${rpm} RPM (core=${CORE_POOL}, max=${MAX_POOL}, queue=${QUEUE}, hikari=${HIKARI_MAX_POOL}, duration=${DURATION})"
   echo "========================================================"
 
   : > "${log_file}"
@@ -67,6 +68,7 @@ run_one() {
     --app.async-thread-pool.max-pool-size=${MAX_POOL} \
     --app.async-thread-pool.queue-capacity=${QUEUE} \
     --app.web-client-fan-out.routing-mode=sharded \
+    --spring.datasource.hikari.maximum-pool-size=${HIKARI_MAX_POOL} \
     > "${log_file}" 2>&1 &
   local pid=$!
   echo "Gateway PID: ${pid}"
@@ -116,7 +118,7 @@ run_one() {
 }
 
 echo "Sweep RPMs: ${RPMS[*]}"
-echo "Core: ${CORE_POOL}, Max: ${MAX_POOL}, Queue: ${QUEUE}, Duration: ${DURATION}"
+echo "Core: ${CORE_POOL}, Max: ${MAX_POOL}, Queue: ${QUEUE}, Hikari: ${HIKARI_MAX_POOL}, Duration: ${DURATION}"
 echo "Mode: ${MODE}, Base URL: ${BASE_URL}"
 echo ""
 

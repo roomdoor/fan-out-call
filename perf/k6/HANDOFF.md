@@ -142,6 +142,7 @@ node perf/k6/parse.mjs               # pool/queue sweep용 (pool_*.json 읽음)
 | `v5-c200-m500-q200-load20-100/` | asymmetric pool (core=200/max=500) |
 | `v6-matrix-pool-512-1024-2048/` | 3 pool × 7 RPM matrix (MATRIX_REPORT.md 포함) |
 | `v7-elastic-vs-fixed/` | queue=200 고정, c=512/m=1024 vs c=m=1024 비교 |
+| `v8-hikari-10-vs-50/` | Hikari pool 10 vs 50 비교 (RPM 60/80) — **Hikari는 병목 아님** |
 
 ### 핵심 발견 (정량)
 
@@ -165,47 +166,38 @@ node perf/k6/parse.mjs               # pool/queue sweep용 (pool_*.json 읽음)
 
 ---
 
-## 6. 진행 중이었던 다음 단계 (중단됨)
+## 6. 완료된 검증 / 다음 단계
 
-### Hikari 가설 검증
-- **가설**: 진짜 병목은 thread pool이 아니라 Spring Boot 기본 Hikari connection pool (`maximum-pool-size=10`)
-- **근거**: pool 512와 1024가 모든 RPM에서 동일 수치 → thread pool은 남고 다른 자원이 직렬화 중
-- **검증 방법**: Hikari pool을 50으로 늘리고 같은 부하 (RPM 60, 80) 실행 후 천장이 위로 가는지 확인
+### v8: Hikari 가설 검증 ✅ 완료 (2026-06-01)
 
-### 실행 명령 (load_sweep.sh에 `HIKARI_MAX_POOL` 지원은 아직 미추가 — 추가하거나 수동 실행)
+**결론: Hikari는 병목이 아니다.**
 
-**옵션 A: load_sweep.sh에 한 줄 추가**
+Hikari=10 vs Hikari=50 모두 RPM 60 → 116 COMPLETED / 0 FAILED, RPM 80 → 53 COMPLETED / 107 FAILED 로 **완전히 동일**.
+실패 원인은 그대로 `RejectedExecutionException (pool=1024 full, queue=200 full)`.
 
-`load_sweep.sh`의 `java -jar` 블록에 추가:
+`load_sweep.sh`에 `HIKARI_MAX_POOL` 환경변수 지원 추가됨. 기본값 10, 사용법:
 ```bash
---spring.datasource.hikari.maximum-pool-size=${HIKARI_MAX_POOL:-10} \
+CORE_POOL=512 MAX_POOL=1024 QUEUE=200 HIKARI_MAX_POOL=50 perf/k6/load_sweep.sh 60 80
 ```
 
-그 다음:
+### 다음 가설: coroutine / webclient 모드 비교
+
+`async-threadpool` 모드는 bank call 1개 = thread 1개 점유. RPM 80 × 50 banks = 4,000개 thread 슬롯 필요 → pool+queue=1,224으로 턱없이 부족.
+
+- **coroutine 모드**: Kotlin 코루틴 + Semaphore로 thread를 점유하지 않고 I/O 대기
+- **webclient 모드**: Reactor non-blocking I/O
+
 ```bash
-CORE_POOL=512 MAX_POOL=1024 QUEUE=200 HIKARI_MAX_POOL=50 \
-  perf/k6/load_sweep.sh 60 80
+# coroutine 모드 테스트
+CORE_POOL=512 MAX_POOL=1024 QUEUE=200 MODE=coroutine \
+  perf/k6/load_sweep.sh 60 80 100
+
+# webclient 모드 테스트
+CORE_POOL=512 MAX_POOL=1024 QUEUE=200 MODE=webclient \
+  perf/k6/load_sweep.sh 60 80 100
 ```
 
-**옵션 B: 수동 java 실행** (한 회차씩)
-```bash
-java -jar build/libs/loan-limit-gateway-*.jar \
-  --app.async-thread-pool.core-pool-size=512 \
-  --app.async-thread-pool.max-pool-size=1024 \
-  --app.async-thread-pool.queue-capacity=200 \
-  --app.web-client-fan-out.routing-mode=sharded \
-  --spring.datasource.hikari.maximum-pool-size=50 &
-
-# 별도 터미널
-cd perf/k6
-MODE=async-threadpool LOAD_RPM=80 DURATION=2m MAX_WAIT_MS=120000 \
-  k6 run --summary-export=results/hikari50_rpm80.json load.js
-```
-
-### 검증 후 결론 시나리오
-- **Hikari=10 RPM 80 → COMPLETED 53건** (기준값)
-- Hikari=50 RPM 80 → COMPLETED **80건 이상** 이면 Hikari가 병목 확정
-- Hikari=50으로도 별 차이 없으면 다른 자원 (예: Kotlin Dispatchers.IO, MySQL 자체)
+**기대**: coroutine/webclient 모드에서 RPM 80 이상에서도 COMPLETED 증가 확인 시 → 모드별 성능 천장 비교 가능
 
 ---
 
