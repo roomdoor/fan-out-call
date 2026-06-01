@@ -143,6 +143,7 @@ node perf/k6/parse.mjs               # pool/queue sweep용 (pool_*.json 읽음)
 | `v6-matrix-pool-512-1024-2048/` | 3 pool × 7 RPM matrix (MATRIX_REPORT.md 포함) |
 | `v7-elastic-vs-fixed/` | queue=200 고정, c=512/m=1024 vs c=m=1024 비교 |
 | `v8-hikari-10-vs-50/` | Hikari pool 10 vs 50 비교 (RPM 60/80) — **Hikari는 병목 아님** |
+| `v9-webclient-rpm60-100/` | webclient(WebFlux) 모드 RPM 60/80/100 — **100 RPM까지 FAILED 0건** |
 
 ### 핵심 발견 (정량)
 
@@ -180,24 +181,31 @@ Hikari=10 vs Hikari=50 모두 RPM 60 → 116 COMPLETED / 0 FAILED, RPM 80 → 53
 CORE_POOL=512 MAX_POOL=1024 QUEUE=200 HIKARI_MAX_POOL=50 perf/k6/load_sweep.sh 60 80
 ```
 
-### 다음 가설: coroutine / webclient 모드 비교
+### v9: webclient(WebFlux) 모드 ✅ 완료 (2026-06-01)
 
-`async-threadpool` 모드는 bank call 1개 = thread 1개 점유. RPM 80 × 50 banks = 4,000개 thread 슬롯 필요 → pool+queue=1,224으로 턱없이 부족.
+**결론: WebFlux가 async-threadpool 대비 압도적 우위.**
 
-- **coroutine 모드**: Kotlin 코루틴 + Semaphore로 thread를 점유하지 않고 I/O 대기
-- **webclient 모드**: Reactor non-blocking I/O
+| RPM | async-threadpool | webclient |
+|-----|-----------------|-----------|
+| 60  | 116 COMPLETED / 0 FAILED | 120 COMPLETED / 0 FAILED |
+| 80  | 53 COMPLETED / 107 FAILED | **161 COMPLETED / 0 FAILED** |
+| 100 | 35 COMPLETED / 165 FAILED | **201 COMPLETED / 0 FAILED** |
 
-```bash
-# coroutine 모드 테스트
-CORE_POOL=512 MAX_POOL=1024 QUEUE=200 MODE=coroutine \
-  perf/k6/load_sweep.sh 60 80 100
+Reactor non-blocking I/O로 thread 점유 없이 처리 → RPM 100까지 FAILED 0건. e2e p95도 31~32s로 단축.
 
-# webclient 모드 테스트
-CORE_POOL=512 MAX_POOL=1024 QUEUE=200 MODE=webclient \
-  perf/k6/load_sweep.sh 60 80 100
-```
+### 다음 단계
 
-**기대**: coroutine/webclient 모드에서 RPM 80 이상에서도 COMPLETED 증가 확인 시 → 모드별 성능 천장 비교 가능
+1. **webclient 천장 탐색**: RPM 120, 150, 200
+   ```bash
+   CORE_POOL=512 MAX_POOL=1024 QUEUE=200 MODE=webclient \
+     DURATION=2m MAX_WAIT_MS=120000 perf/k6/load_sweep.sh 120 150 200
+   ```
+
+2. **coroutine 모드 비교**: Kotlin 코루틴 + Semaphore 방식과 WebFlux 직접 대결
+   ```bash
+   CORE_POOL=512 MAX_POOL=1024 QUEUE=200 MODE=coroutine \
+     DURATION=2m MAX_WAIT_MS=120000 perf/k6/load_sweep.sh 80 100 120
+   ```
 
 ---
 
