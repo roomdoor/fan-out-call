@@ -144,6 +144,7 @@ node perf/k6/parse.mjs               # pool/queue sweep용 (pool_*.json 읽음)
 | `v7-elastic-vs-fixed/` | queue=200 고정, c=512/m=1024 vs c=m=1024 비교 |
 | `v8-hikari-10-vs-50/` | Hikari pool 10 vs 50 비교 (RPM 60/80) — **Hikari는 병목 아님** |
 | `v9-webclient-rpm60-100/` | webclient(WebFlux) 모드 RPM 60/80/100 — **100 RPM까지 FAILED 0건** |
+| `v10-webclient-ceiling/` | webclient 천장 탐색 RPM 120~700 — **안전 한계 400 RPM, 한계 초과 시 PARTIAL(graceful)** |
 
 ### 핵심 발견 (정량)
 
