@@ -2,6 +2,7 @@ package com.example.loanlimit.bank
 
 import com.example.loanlimit.config.AppProperties
 import com.example.loanlimit.bankcallresult.service.BankCatalogService
+import org.springframework.beans.factory.annotation.Qualifier
 import org.springframework.web.reactive.function.client.WebClient
 import org.springframework.stereotype.Component
 
@@ -9,13 +10,13 @@ import org.springframework.stereotype.Component
 class BankApiServiceRegistry(
     bankCatalogService: BankCatalogService,
     appProperties: AppProperties,
-    webClientBuilder: WebClient.Builder,
+    @Qualifier("sharedBankWebClient") webClient: WebClient,
 ) {
     private val servicesByBankCode: Map<String, BankApiService> = bankCatalogService.getAll().associate { bankCode ->
         bankCode to ExternalBankApiService(
             bankCode = bankCode,
             appProperties = appProperties,
-            webClientBuilder = webClientBuilder,
+            webClient = webClient,
         )
     }
 

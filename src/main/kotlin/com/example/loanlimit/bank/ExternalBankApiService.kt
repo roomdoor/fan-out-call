@@ -12,16 +12,14 @@ import java.time.LocalDateTime
 class ExternalBankApiService(
     override val bankCode: String,
     private val appProperties: AppProperties,
-    private val webClientBuilder: WebClient.Builder,
+    private val webClient: WebClient,
 ) : BankApiService {
     private val mockBaseUrl: String by lazy {
         appProperties.webClientFanOut.resolveMockBaseUrl(bankCode)
     }
 
-    private val webClient: WebClient by lazy {
-        webClientBuilder
-            .baseUrl(mockBaseUrl)
-            .build()
+    private val bankApiUrl: String by lazy {
+        "$mockBaseUrl/api/v1/mock-external/banks/$bankCode/loan-limit"
     }
 
     override fun buildRequest(request: LoanLimitQueryRequest): String {
@@ -33,7 +31,7 @@ class ExternalBankApiService(
         requestPayload: String,
     ): MockExternalCallResult {
         return webClient.post()
-            .uri("/api/v1/mock-external/banks/{bankCode}/loan-limit", bankCode)
+            .uri(bankApiUrl)
             .bodyValue(request)
             .attribute("bankCode", bankCode)
             .retrieve()
@@ -48,7 +46,7 @@ class ExternalBankApiService(
         requestPayload: String,
     ): MockExternalCallResult {
         return webClient.post()
-            .uri("/api/v1/mock-external/banks/{bankCode}/loan-limit", bankCode)
+            .uri(bankApiUrl)
             .bodyValue(request)
             .attribute("bankCode", bankCode)
             .retrieve()
