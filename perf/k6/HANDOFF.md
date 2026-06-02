@@ -145,6 +145,7 @@ node perf/k6/parse.mjs               # pool/queue sweep용 (pool_*.json 읽음)
 | `v8-hikari-10-vs-50/` | Hikari pool 10 vs 50 비교 (RPM 60/80) — **Hikari는 병목 아님** |
 | `v9-webclient-rpm60-100/` | webclient(WebFlux) 모드 RPM 60/80/100 — **100 RPM까지 FAILED 0건** |
 | `v10-webclient-ceiling/` | webclient 천장 탐색 RPM 120~700 — **안전 한계 400 RPM, 한계 초과 시 PARTIAL(graceful)** |
+| `v11-coroutine-ceiling/` | coroutine 모드 RPM 100~700 — **결과 무효**: Reactor Netty 커넥션 풀 버그(pending queue 포화) |
 
 ### 핵심 발견 (정량)
 
@@ -202,11 +203,10 @@ Reactor non-blocking I/O로 thread 점유 없이 처리 → RPM 100까지 FAILED
      DURATION=2m MAX_WAIT_MS=120000 perf/k6/load_sweep.sh 120 150 200
    ```
 
-2. **coroutine 모드 비교**: Kotlin 코루틴 + Semaphore 방식과 WebFlux 직접 대결
-   ```bash
-   CORE_POOL=512 MAX_POOL=1024 QUEUE=200 MODE=coroutine \
-     DURATION=2m MAX_WAIT_MS=120000 perf/k6/load_sweep.sh 80 100 120
-   ```
+2. **coroutine 모드 재테스트 (커넥션 풀 수정 후)**:
+   - 현재 coroutine 모드는 은행 50개 각자 개별 WebClient 풀 사용 → 고RPM에서 `Pending acquire queue` 포화
+   - `WebClientConfig`에서 커넥션 풀 한도 늘리거나(Option A), 공유 WebClient 주입(Option B) 수정 필요
+   - 수정 후 webclient 동일 조건으로 재테스트 → v12
 
 ---
 
