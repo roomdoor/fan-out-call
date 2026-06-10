@@ -63,12 +63,13 @@ run_one() {
 
   : > "${log_file}"
 
-  java -jar "${GATEWAY_JAR}" \
+  java ${JAVA_OPTS:-} -jar "${GATEWAY_JAR}" \
     --app.async-thread-pool.core-pool-size=${CORE_POOL} \
     --app.async-thread-pool.max-pool-size=${MAX_POOL} \
     --app.async-thread-pool.queue-capacity=${QUEUE} \
     --app.web-client-fan-out.routing-mode=sharded \
     --spring.datasource.hikari.maximum-pool-size=${HIKARI_MAX_POOL} \
+    ${EXTRA_ARGS:-} \
     > "${log_file}" 2>&1 &
   local pid=$!
   echo "Gateway PID: ${pid}"

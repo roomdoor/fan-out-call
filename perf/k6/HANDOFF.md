@@ -147,16 +147,18 @@ node perf/k6/parse.mjs               # pool/queue sweep용 (pool_*.json 읽음)
 | `v10-webclient-ceiling/` | webclient 천장 탐색 RPM 120~700 — **안전 한계 400 RPM, 한계 초과 시 PARTIAL(graceful)** |
 | `v11-coroutine-ceiling/` | coroutine 모드 RPM 100~700 — **결과 무효**: Reactor Netty 커넥션 풀 버그(pending queue 포화) |
 | `v12-coroutine-fixed/` | coroutine 공유 WebClient 수정 후 재테스트 — **안전 한계 600 RPM**, webclient(400) 대비 1.5× 우위 |
+| `v13-asyncpool-optimal/` | **async-threadpool 최적 core/max/queue 확정** — c=1700/m=1700/q=200 + IO=192, 안전 천장 **185 RPM** (기존 60의 3.1배). REPORT.md 필독 |
 
 ### 핵심 발견 (정량)
 
-| 항목 | 수치 |
-| --- | --- |
-| **단일 파드 안전 처리량** | **60 RPM** (113건 시도 → 112 COMPLETED, 0 FAILED, e2e p95 31.6s) |
-| **80 RPM에서** | 161건 받지만 **53 COMPLETED / 108 FAILED** (RejectedExecutionException, fail-fast) |
-| **100 RPM에서** | 35 COMPLETED / 165 FAILED (82% 거부) |
-| **이론치 최소 e2e** | 30s (= slowest bank), 측정 p95와 일치 → 게이트웨이 오버헤드 무시 가능 |
-| **권장 SLA (마진 30%)** | 분당 **42건/파드** |
+> ⚠️ 아래 표는 v6 시점(개별 WebClient + Dispatchers.IO 64 한계) 수치. **v13에서 갱신됨** — async-threadpool 천장 60 → **185 RPM** (c=1700/m=1700/q=200 + IO=192). 최신 수치는 `results/v13-asyncpool-optimal/REPORT.md` 참조.
+
+| 항목 | 수치 (v6 당시) | v13 갱신 |
+| --- | --- | --- |
+| **단일 파드 안전 처리량** | 60 RPM | **185 RPM** (4분 지속 100% COMPLETED) |
+| **천장 공식** | (모름 — pool 증설 무효과로 보임) | **RPM ≈ pool ÷ 9** (요청당 540 thread-sec) |
+| **이론치 최소 e2e** | 30s (= slowest bank) | 동일 — q=200 구성 p95 32.1s |
+| **권장 SLA (마진 30%)** | 분당 42건/파드 | **분당 130건/파드** |
 
 ### 핵심 발견 (정성)
 
@@ -208,6 +210,24 @@ Reactor non-blocking I/O로 thread 점유 없이 처리 → RPM 100까지 FAILED
    - 현재 coroutine 모드는 은행 50개 각자 개별 WebClient 풀 사용 → 고RPM에서 `Pending acquire queue` 포화
    - `WebClientConfig`에서 커넥션 풀 한도 늘리거나(Option A), 공유 WebClient 주입(Option B) 수정 필요
    - ✅ v12 완료: 공유 WebClient 수정 후 coroutine 안전 한계 **600 RPM** 확인 (webclient 400 대비 1.5×)
+
+### v13: async-threadpool 최적 core/max/queue ✅ 완료 (2026-06-11)
+
+**결론: `core=1700, max=1700, queue=200` + `-Dkotlinx.coroutines.io.parallelism=192` + Tomcat 50 → 안전 천장 185 RPM** (상세: `results/v13-asyncpool-optimal/REPORT.md`)
+
+핵심 발견 4가지:
+1. **v6 "pool 늘려도 개선 0%" 결론은 무효** — v12 공유 WebClient 수정 이전 측정이었음. 수정 후엔 천장 = pool÷9 (Little's Law, 요청당 540 thread-sec)로 정직하게 스케일
+2. **Dispatchers.IO(기본 64워커) 교착 발견** — orchestrator의 backgroundScope(IO) 위에서 executor가 `allOf().join()` 하드 블로킹 + 결과 저장도 IO 필요 → 동시 run ≥ 64(≈124 RPM)에서 완료 0건 전면 교착. `-Dkotlinx.coroutines.io.parallelism=192`로 해소. 구조적 교정은 join()→await()
+3. **스레드 예산**: macOS 한계 2,048 = pool 1700 + IO ~100 + Tomcat 50(캡 필수) + JVM ~70. pool 1792는 위험
+4. **queue는 천장을 못 바꿈** — 천장 아래선 큐가 거의 빔. q=200이 q=2048보다 p95 우수(32.1s vs 39.5s) + 과부하 시 fail-fast. elastic(c=850/m=1700/q=200)은 fixed와 동일 성능
+
+`load_sweep.sh`에 `JAVA_OPTS`(jar 앞 JVM 플래그), `EXTRA_ARGS`(jar 뒤 Spring 인자) 지원 추가됨.
+
+### 다음 단계 (v14 후보)
+
+1. **join() → await() 코드 교정** 후 IO 플래그 없이 재검증
+2. executor 큐 깊이/활성 스레드 actuator 메트릭 노출 (k6 폴링 양자화와 분리된 내부 관측)
+3. Linux 파드에서 pool > 1700 영역 확인 (macOS 스레드 한계 없는 환경)
 
 ---
 
