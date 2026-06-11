@@ -148,6 +148,7 @@ node perf/k6/parse.mjs               # pool/queue sweep용 (pool_*.json 읽음)
 | `v11-coroutine-ceiling/` | coroutine 모드 RPM 100~700 — **결과 무효**: Reactor Netty 커넥션 풀 버그(pending queue 포화) |
 | `v12-coroutine-fixed/` | coroutine 공유 WebClient 수정 후 재테스트 — **안전 한계 600 RPM**, webclient(400) 대비 1.5× 우위 |
 | `v13-asyncpool-optimal/` | **async-threadpool 최적 core/max/queue 확정** — c=1700/m=1700/q=200 + IO=192, 안전 천장 **185 RPM** (기존 60의 3.1배). REPORT.md 필독 |
+| `v14-virtual-threads/` | **virtual thread 실험** — executor 한 줄 교체로 스레드 천장 제거 (OS 스레드 378개로 200 RPM). 100% 처리 천장 **300 RPM**, 새 병목은 WebClient 커넥션 풀 → mock/호스트 용량. REPORT.md 참조 |
 
 ### 핵심 발견 (정량)
 
@@ -223,11 +224,24 @@ Reactor non-blocking I/O로 thread 점유 없이 처리 → RPM 100까지 FAILED
 
 `load_sweep.sh`에 `JAVA_OPTS`(jar 앞 JVM 플래그), `EXTRA_ARGS`(jar 뒤 Spring 인자) 지원 추가됨.
 
-### 다음 단계 (v14 후보)
+### v14: virtual thread 실험 ✅ 완료 (2026-06-11)
+
+**결론: blocking 코드 그대로 executor만 virtual thread로 교체 → 스레드 천장 제거.** (상세: `results/v14-virtual-threads/REPORT.md`)
+
+- `--app.async-thread-pool.virtual=true` 플래그 추가 (AsyncExecutionConfig 분기, 기존 경로 무수정)
+- OS 스레드 378개로 200 RPM 처리 (platform이면 ~1,900개 필요) → macOS 2,048 한계 무의미
+- 100% 처리 천장 **300 RPM** (p95 58.8s 열화), 클린 천장 200 RPM (p95 42.2s)
+- 병목 이동: 스레드 → WebClient maxConnections(2000≈222 RPM 상당, property화하여 5000으로 완화) → mock/호스트 포화 (400+에서 커넥션 에러, 600에서 10샤드 균등 실패)
+- `app.web-client-fan-out.max-connections` / `pending-acquire-max-count` property 추가
+- 주의: virtual 모드에도 Dispatchers.IO 한계는 그대로 → `-Dkotlinx.coroutines.io.parallelism=512` 필요
+
+### 다음 단계 (v15 후보)
 
 1. **join() → await() 코드 교정** 후 IO 플래그 없이 재검증
-2. executor 큐 깊이/활성 스레드 actuator 메트릭 노출 (k6 폴링 양자화와 분리된 내부 관측)
-3. Linux 파드에서 pool > 1700 영역 확인 (macOS 스레드 한계 없는 환경)
+2. mock 함대 별도 머신 분리 후 VT vs coroutine vs webclient 정면 비교 (현재 600 RPM 부근은 단일 머신 포화로 오염)
+3. virtual 모드 인입 backpressure (세마포어/rate limit) 설계
+4. OpenFeign 모드 추가 — 예측: blocking 모델이라 천장 동일, Apache HC5 기본 풀(25/5)이면 한 자릿수 RPM에서 막힘
+5. executor 큐 깊이/활성 스레드 actuator 메트릭 노출, Linux 파드에서 pool > 1700 영역 확인
 
 ---
 

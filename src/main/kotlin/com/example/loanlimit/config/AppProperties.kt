@@ -21,6 +21,8 @@ data class AppProperties(
         val maxPoolSize: Int = 64,
         val queueCapacity: Int = 100,
         val threadNamePrefix: String = "loan-limit-async-",
+        // true면 platform thread pool 대신 virtual thread per-task executor 사용 (pool/queue 설정 무시)
+        val virtual: Boolean = false,
     )
 
     data class WebClientFanOut(
@@ -28,6 +30,9 @@ data class AppProperties(
         val routingMode: MockRoutingMode = MockRoutingMode.SINGLE,
         val shardedMockRouting: ShardedMockRouting = ShardedMockRouting(),
         val maxConcurrency: Int = 50,
+        // 공유 WebClient 커넥션 풀 (모든 모드 공통)
+        val maxConnections: Int = 2_000,
+        val pendingAcquireMaxCount: Int = 10_000,
     ) {
         fun resolveMockBaseUrl(bankCode: String): String {
             return when (routingMode) {

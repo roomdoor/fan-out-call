@@ -14,7 +14,9 @@ import reactor.netty.resources.ConnectionProvider
 import java.time.Duration
 
 @Configuration
-class WebClientConfig {
+class WebClientConfig(
+    private val appProperties: AppProperties,
+) {
     @Bean
     fun webClientBuilder(): WebClient.Builder {
         return WebClient.builder()
@@ -25,8 +27,8 @@ class WebClientConfig {
     @Bean
     fun sharedBankWebClient(): WebClient {
         val connectionProvider = ConnectionProvider.builder("shared-bank-pool")
-            .maxConnections(2000)
-            .pendingAcquireMaxCount(10000)
+            .maxConnections(appProperties.webClientFanOut.maxConnections)
+            .pendingAcquireMaxCount(appProperties.webClientFanOut.pendingAcquireMaxCount)
             .pendingAcquireTimeout(Duration.ofSeconds(60))
             .build()
         return WebClient.builder()

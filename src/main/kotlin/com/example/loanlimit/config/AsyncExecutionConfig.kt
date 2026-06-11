@@ -16,6 +16,15 @@ class AsyncExecutionConfig(
 ) {
     @Bean(name = [BANK_ASYNC_EXECUTOR])
     fun bankAsyncExecutor(): Executor {
+        if (appProperties.asyncThreadPool.virtual) {
+            val factory = Thread.ofVirtual()
+                .name(appProperties.asyncThreadPool.threadNamePrefix + "vt-", 0)
+                .factory()
+            val virtualExecutor = java.util.concurrent.Executors.newThreadPerTaskExecutor(factory)
+            val decorator = MdcCopyingTaskDecorator()
+            return Executor { task -> virtualExecutor.execute(decorator.decorate(task)) }
+        }
+
         return ThreadPoolTaskExecutor().apply {
             corePoolSize = appProperties.asyncThreadPool.corePoolSize
             maxPoolSize = appProperties.asyncThreadPool.maxPoolSize
