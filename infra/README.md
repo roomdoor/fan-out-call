@@ -72,6 +72,15 @@ SSM 접속 기본 사용자는 `ssm-user`(비root)다. 헬퍼는 docker 실행�
 - `destroy` 를 잊지 말 것. 태그 `Ephemeral=true` 로 남은 리소스를 찾을 수 있다
 - AWS Budgets 알림을 따로 걸어둘 것. 자동화가 실패하는 날이 온다
 
-## 남은 작업
+## 측정 실행
 
-`perf/k6/load_sweep.sh` 는 아직 게이트웨이를 자기 기계에서 `java -jar` 로 띄우고 로그를 `tail` 한다. 원격 기동(SSM)과 로그 수거로 바꿔야 sweep 전체가 자동으로 돈다. 실효 처리율을 게이트웨이 로그 파싱으로 세기 때문에 로그 수거가 핵심이다.
+`apply` 가 끝나면 C 호스트에서 돌린다. 오케스트레이션은 `perf/k6/bench.sh` 가 맡는다.
+
+```bash
+aws ssm start-session --target <k6-instance-id> --region ap-northeast-2
+cd /opt/fan-out-call/perf/k6
+./bench.sh config/v15-baseline.env
+node parse.mjs results/v15-baseline
+```
+
+`bench.sh` 가 회차마다 게이트웨이를 SSM으로 재기동하고, k6를 이 호스트에서 돌리고, 게이트웨이 로그 카운트를 받아 `manifest.json` 에 조건과 함께 남긴다. 자세한 내용은 [`perf/k6/README.md`](../perf/k6/README.md) 참조.
