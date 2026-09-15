@@ -1,0 +1,109 @@
+#!/bin/bash
+# A 호스트 — 게이트웨이 + MySQL. 측정 대상이라 이 호스트에는 부하 생성기를 두지 않는다.
+set -euxo pipefail
+exec > >(tee /var/log/bench-bootstrap.log) 2>&1
+
+dnf install -y docker
+systemctl enable --now docker
+
+# blocking 모드는 pool 크기가 곧 천장이다(RPM ~ pool / 9).
+# macOS의 kern.num_taskthreads=2048 벽 때문에 로컬에서는 pool 1700이 상한이었다.
+# Linux에는 그 벽이 없으므로 여유 있게 올려둔다.
+sysctl -w kernel.threads-max=4194304
+sysctl -w kernel.pid_max=4194304
+sysctl -w fs.file-max=2097152
+sysctl -w vm.max_map_count=1048576
+
+# 은행 50곳으로 나가는 동시 커넥션이 9 x RPM 규모다.
+sysctl -w net.ipv4.ip_local_port_range="1024 65535"
+sysctl -w net.core.somaxconn=65535
+sysctl -w net.ipv4.tcp_max_syn_backlog=65535
+sysctl -w net.ipv4.tcp_tw_reuse=1
+
+# MySQL은 루프백에만 바인딩한다. 이 호스트 안에서만 쓰이므로
+# 보안 그룹에 3306 인바운드 규칙도 만들지 않았다. 방어가 이중이 된다.
+docker run -d \
+  --name mysql \
+  --restart unless-stopped \
+  -p 127.0.0.1:3306:3306 \
+  -e MYSQL_ROOT_PASSWORD='${db_password}' \
+  -e MYSQL_DATABASE=loan_limit_gateway \
+  mysql:8.4 \
+  --character-set-server=utf8mb4 \
+  --collation-server=utf8mb4_unicode_ci \
+  --default-time-zone=+09:00
+
+for _ in $(seq 1 90); do
+  if docker exec mysql mysqladmin ping -uroot -p'${db_password}' --silent 2>/dev/null; then break; fi
+  sleep 2
+done
+
+docker pull "${image}"
+
+# 측정 스크립트가 회차마다 pool/queue를 바꿔가며 게이트웨이를 재기동한다.
+# 그래서 여기서는 띄우지 않고, 재기동용 헬퍼만 깔아둔다.
+# 받은 인자는 그대로 Spring 인자가 된다.
+cat > /usr/local/bin/gateway-run.sh <<'SCRIPT'
+#!/bin/bash
+set -euo pipefail
+
+docker rm -f gateway 2>/dev/null || true
+
+# JVM 플래그는 JAVA_TOOL_OPTIONS로 넘긴다.
+#   JAVA_TOOL_OPTIONS="-Dkotlinx.coroutines.io.parallelism=192" gateway-run.sh --app...=1700
+docker run -d \
+  --name gateway \
+  --network host \
+  --ulimit nofile=1048576:1048576 \
+  --ulimit nproc=4194304:4194304 \
+  -e JAVA_TOOL_OPTIONS="$${JAVA_TOOL_OPTIONS:-}" \
+  -e SPRING_DATASOURCE_URL="jdbc:mysql://127.0.0.1:3306/loan_limit_gateway?serverTimezone=Asia/Seoul&characterEncoding=UTF-8" \
+  -e SPRING_DATASOURCE_USERNAME=root \
+  -e SPRING_DATASOURCE_PASSWORD="$(cat /etc/bench-db-password)" \
+  __IMAGE__ \
+  --app.web-client-fan-out.routing-mode=sharded \
+  --app.web-client-fan-out.mock-base-url="http://__MOCK_HOST__:__BASE_PORT__" \
+  --app.web-client-fan-out.sharded-mock-routing.base-port=__BASE_PORT__ \
+  --app.web-client-fan-out.sharded-mock-routing.shard-count=__SHARD_COUNT__ \
+  "$@"
+
+for _ in $(seq 1 120); do
+  if [ "$(curl -sf http://localhost:8080/actuator/health | sed -n 's/.*"status":"\([A-Z]*\)".*/\1/p')" = "UP" ]; then
+    echo "gateway UP"
+    exit 0
+  fi
+  if ! docker ps --format '{{.Names}}' | grep -qx gateway; then
+    echo "gateway died:" >&2
+    docker logs --tail 50 gateway >&2
+    exit 1
+  fi
+  sleep 1
+done
+
+echo "gateway never reported UP" >&2
+docker logs --tail 50 gateway >&2
+exit 1
+SCRIPT
+
+# 힌트 문자열을 실제 값으로 치환한다. 헬퍼 안에서 Terraform 보간과
+# 셸 확장이 섞이지 않게 하려고 한 단계 미뤄서 넣는다.
+sed -i \
+  -e "s|__IMAGE__|${image}|" \
+  -e "s|__MOCK_HOST__|${mock_host}|" \
+  -e "s|__BASE_PORT__|${base_port}|g" \
+  -e "s|__SHARD_COUNT__|${shard_count}|" \
+  /usr/local/bin/gateway-run.sh
+
+chmod +x /usr/local/bin/gateway-run.sh
+
+umask 077
+printf '%s' '${db_password}' > /etc/bench-db-password
+
+# mock 샤드가 전부 응답할 때까지 기다린다.
+for _ in $(seq 1 120); do
+  if curl -sf "http://${mock_host}:${base_port}/health" >/dev/null; then break; fi
+  sleep 2
+done
+
+touch /var/lib/bench-ready
+echo "gateway host ready. start with: gateway-run.sh --app.async-thread-pool.core-pool-size=1700"

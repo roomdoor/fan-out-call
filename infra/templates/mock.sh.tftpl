@@ -1,0 +1,46 @@
+#!/bin/bash
+# B 호스트 — mock 금융사 서버 ${shard_count}샤드
+set -euxo pipefail
+exec > >(tee /var/log/bench-bootstrap.log) 2>&1
+
+dnf install -y docker
+systemctl enable --now docker
+
+# 샤드 하나당 수백 개의 동시 커넥션을 붙잡는다.
+sysctl -w fs.file-max=2097152
+sysctl -w net.core.somaxconn=65535
+sysctl -w net.ipv4.tcp_max_syn_backlog=65535
+
+docker pull "${image}"
+
+for i in $(seq 0 $(( ${shard_count} - 1 ))); do
+  port=$(( ${base_port} + i ))
+  docker run -d \
+    --name "mock-bank-$${i}" \
+    --restart unless-stopped \
+    --ulimit nofile=1048576:1048576 \
+    -p "$${port}:18080" \
+    -e MOCK_SERVER_PORT=18080 \
+    -e MOCK_BANK_COUNT=50 \
+    -e MOCK_MIN_LATENCY_MS=${latency.min_ms} \
+    -e MOCK_MAX_LATENCY_MS=${latency.max_ms} \
+    -e MOCK_SLOW_MIN_LATENCY_MS=${latency.slow_min_ms} \
+    -e MOCK_SLOW_MAX_LATENCY_MS=${latency.slow_max_ms} \
+    -e MOCK_SLOW_BANK_COUNT=${latency.slow_bank_count} \
+    -e MOCK_SUCCESS_RATE_PERCENT=${latency.success_rate_pct} \
+    -e JAVA_TOOL_OPTIONS="-Xms256m -Xmx512m" \
+    "${image}"
+done
+
+# 전 샤드가 응답할 때까지 기다린다. 게이트웨이가 이보다 먼저 호출하면
+# 첫 회차가 통째로 오염된다.
+for i in $(seq 0 $(( ${shard_count} - 1 ))); do
+  port=$(( ${base_port} + i ))
+  for _ in $(seq 1 60); do
+    if curl -sf "http://localhost:$${port}/health" >/dev/null; then break; fi
+    sleep 2
+  done
+done
+
+touch /var/lib/bench-ready
+echo "mock fleet ready: ${shard_count} shards from port ${base_port}"

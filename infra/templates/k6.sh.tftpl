@@ -1,0 +1,57 @@
+#!/bin/bash
+# C 호스트 — k6 부하 생성기.
+# 게이트웨이와 같은 호스트에 두지 않는다. maxVUs가 RPM x 10이라
+# 600 RPM이면 6,000 VU고, 이게 CPU를 먹으면 측정 대상을 방해한다.
+set -euxo pipefail
+exec > >(tee /var/log/bench-bootstrap.log) 2>&1
+
+dnf install -y git jq
+
+# k6 공식 RPM 저장소
+cat > /etc/yum.repos.d/k6.repo <<'REPO'
+[k6]
+name=k6
+baseurl=https://dl.k6.io/rpm
+enabled=1
+gpgcheck=1
+gpgkey=https://dl.k6.io/key.gpg
+REPO
+dnf install -y k6
+
+# VU 하나가 커넥션을 붙잡는다. 기본 nofile로는 수천 VU에서 막힌다.
+sysctl -w fs.file-max=2097152
+sysctl -w net.ipv4.ip_local_port_range="1024 65535"
+sysctl -w net.ipv4.tcp_tw_reuse=1
+cat >> /etc/security/limits.conf <<'LIMITS'
+* soft nofile 1048576
+* hard nofile 1048576
+LIMITS
+
+# sweep 스크립트와 파서는 게이트웨이 저장소에 있다.
+git clone --depth 1 https://github.com/roomdoor/fan-out-call.git /opt/fan-out-call
+
+cat > /etc/profile.d/bench.sh <<'ENVFILE'
+export BASE_URL="http://__GATEWAY_HOST__:8080"
+export MOCK_HOST="__MOCK_HOST__"
+export MOCK_BASE_PORT="__BASE_PORT__"
+export MOCK_SHARD_COUNT="__SHARD_COUNT__"
+ENVFILE
+
+sed -i \
+  -e "s|__GATEWAY_HOST__|${gateway_host}|" \
+  -e "s|__MOCK_HOST__|${mock_host}|" \
+  -e "s|__BASE_PORT__|${base_port}|" \
+  -e "s|__SHARD_COUNT__|${shard_count}|" \
+  /etc/profile.d/bench.sh
+
+# mock 샤드 전부와 게이트웨이 호스트가 응답하는지 확인한다.
+for i in $(seq 0 $(( ${shard_count} - 1 ))); do
+  port=$(( ${base_port} + i ))
+  for _ in $(seq 1 60); do
+    if curl -sf "http://${mock_host}:$${port}/health" >/dev/null; then break; fi
+    sleep 2
+  done
+done
+
+touch /var/lib/bench-ready
+echo "k6 host ready. BASE_URL=http://${gateway_host}:8080"
