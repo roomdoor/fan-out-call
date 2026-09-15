@@ -12,6 +12,7 @@ import kotlinx.coroutines.reactor.mono
 import kotlinx.coroutines.slf4j.MDCContext
 import org.slf4j.LoggerFactory
 import org.slf4j.MDC
+import org.springframework.beans.factory.annotation.Qualifier
 import org.springframework.stereotype.Component
 import org.springframework.web.reactive.function.client.WebClient
 import org.springframework.web.reactive.function.client.bodyToMono
@@ -25,12 +26,9 @@ import com.example.loanlimit.logging.MdcKeys
 @Component
 class WebClientBankFanOutExecutor(
     private val appProperties: AppProperties,
-    private val webClientBuilder: WebClient.Builder,
+    @Qualifier("sharedBankWebClient") private val webClient: WebClient,
     private val bankApiServiceRegistry: BankApiServiceRegistry,
 ) : BankFanOutExecutor {
-    private val webClient: WebClient by lazy {
-        webClientBuilder.build()
-    }
 
     override suspend fun execute(
         runId: Long,

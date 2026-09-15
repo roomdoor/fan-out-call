@@ -17,13 +17,9 @@ import java.time.Duration
 class WebClientConfig(
     private val appProperties: AppProperties,
 ) {
-    @Bean
-    fun webClientBuilder(): WebClient.Builder {
-        return WebClient.builder()
-            .filter(bankCallLoggingFilter())
-    }
-
-    // 모든 ExternalBankApiService가 공유하는 단일 WebClient — 커넥션 풀을 한 곳에서 관리
+    // 모든 은행 호출이 공유하는 단일 WebClient — 커넥션 풀을 한 곳에서 관리한다.
+    // ExternalBankApiService(coroutine/async-threadpool/sequential 경로)와
+    // WebClientBankFanOutExecutor(webclient 경로)가 같은 풀을 쓴다.
     @Bean
     fun sharedBankWebClient(): WebClient {
         val connectionProvider = ConnectionProvider.builder("shared-bank-pool")
