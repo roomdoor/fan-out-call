@@ -11,6 +11,12 @@ permissions:
   contents: read
   packages: write
 
+# main에 연속으로 푸시되면 두 런이 겹치고, 늦게 끝난 쪽이 latest를 가져간다.
+# 순서가 뒤집히면 latest가 더 오래된 커밋을 가리킬 수 있어 앞선 런을 취소한다.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
