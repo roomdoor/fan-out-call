@@ -1,56 +1,96 @@
-# k6 Performance Tests
+# 측정 스크립트
 
-Performance testing suite for loan-limit-gateway fan-out modes.
+fan-out 모드별 처리 한계를 재는 k6 스위트다. AWS 3호스트에서 돈다 —
+인프라 구성은 [`infra/`](../../infra) 참조.
 
-## Structure
+## 구조
 
 ```
 perf/k6/
+├── bench.sh           오케스트레이터. C(k6)에서 돌며 A(게이트웨이)를 SSM으로 제어
+├── config/*.env       측정 세대 하나 = 파일 하나
+├── parse.mjs          결과 -> 마크다운 표
+├── load.js            주력 시나리오 (constant-arrival-rate)
+├── smoke.js           배포 직후 확인용 1회 실행
 ├── lib/
-│   ├── common.js      # Shared utilities and config
-│   ├── gateway.js     # Gateway API helpers
-│   └── metrics.js     # Custom k6 metrics
-├── journey.js         # End-to-end submit+poll test
-└── smoke.js          # Quick health check
+│   ├── common.js      설정, 모드별 엔드포인트
+│   ├── gateway.js     submit + 완료까지 폴링 (트랜잭션 1건의 생애)
+│   └── metrics.js     커스텀 지표 4종
+└── results/<config>/  회차별 summary.json + manifest.json
 ```
 
-## Prerequisites
+## 실행
 
-- k6 installed: `brew install k6`
-- Gateway running on localhost:8080
-- Mock servers running (10 shards on 18000-18009)
-- MySQL running
+C 호스트에서:
 
-## Quick Start
-
-### Smoke Test
 ```bash
-k6 run perf/k6/smoke.js
+cd /opt/fan-out-call/perf/k6
+./bench.sh config/v15-baseline.env
+node parse.mjs results/v15-baseline
 ```
 
-### Journey Test (single iteration)
+`BASE_URL`, `GATEWAY_INSTANCE_ID`, `AWS_REGION` 은 Terraform이
+`/etc/profile.d/bench.sh` 에 심어둔다. 따로 넣을 필요 없다.
+
+## 세대 추가
+
+`config/` 에 `.env` 하나 만들면 된다. 스크립트는 안 고친다.
+
 ```bash
-MODE=coroutine k6 run perf/k6/journey.js
-MODE=async-threadpool k6 run perf/k6/journey.js
-MODE=webclient k6 run perf/k6/journey.js
+MODE=coroutine              # coroutine | async-threadpool | webclient | sequential
+RPMS="100 200 400 600"
+POOLS=default               # 또는 "512:200 1024:200" (pool:queue)
+REPEATS=3
+DURATION=4m
+MAX_WAIT_MS=180000
+JAVA_OPTS="-Dkotlinx.coroutines.io.parallelism=512"
+EXTRA_ARGS="--server.tomcat.threads.max=200"
 ```
 
-## Environment Variables
+`POOLS` 는 `async-threadpool` 모드에서만 의미가 있다. 다른 모드는
+`default` 로 두면 pool 인자를 넘기지 않는다.
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| BASE_URL | http://localhost:8080 | Gateway base URL |
-| MODE | (required) | coroutine, async-threadpool, webclient |
-| MAX_WAIT_MS | 60000 | Max time to wait for completion |
-| POLL_MIN_MS | 100 | Initial poll interval |
-| POLL_MAX_MS | 5000 | Max poll interval |
+## 왜 manifest.json인가
 
-## Custom Metrics
+회차마다 조건 전체를 결과 옆에 남긴다 — 이미지 **다이제스트**, JVM 플래그,
+Spring 인자, mock 프로파일, duration.
 
-- `e2e_completion_time`: End-to-end time (submit to terminal)
-- `polls_per_transaction`: Number of poll requests per transaction
-- `timeout_waiting_rate`: Rate of transactions that timed out
+이 프로젝트가 결과를 두 번 통째로 버린 이유가 조건 추적 실패였다.
+v6은 공유 WebClient 수정 전 측정인 줄 몰랐고, v13은 시작 시점의 jar가
+최신 커밋보다 오래된 것을 도중에 알아챘다. 태그가 아니라 다이제스트를
+기록하면 `latest` 가 가리키는 대상이 바뀌어도 어느 빌드였는지가 남는다.
 
-## Running Full Benchmarks
+`parse.mjs` 는 한 표 안에 이미지나 JVM 플래그가 섞이면 경고를 낸다.
+pool 512/1024 회차가 `io.parallelism` 기본값 차이로 교란됐던 것이
+그 경고가 잡으려는 상황이다.
 
-See runbook for detailed instructions on baseline and stress tests.
+## 실효 처리율은 k6 지표로 못 센다
+
+풀에서 거부된 트랜잭션도 빠른 `202` 를 받으므로 k6에는 성공으로 보인다.
+그래서 게이트웨이 로그를 직접 센다.
+
+| 로그 패턴 | 의미 |
+| --- | --- |
+| `Background fan-out completed ... status=COMPLETED` | 50/50 전부 성공 |
+| `Background fan-out completed ... status=PARTIAL` | 일부 은행만 응답 |
+| `Run marked as FAILED ... did not accept task` | 풀 거부 |
+
+SSM stdout이 24,000자에서 잘리므로 로그 원본은 가져오지 않는다. A에서
+세고 숫자만 받는다. 원본은 A의 `/var/log/bench/` 에 남는다.
+
+## 환경변수 (시나리오)
+
+| 변수 | 기본값 | 설명 |
+| --- | --- | --- |
+| `BASE_URL` | `http://localhost:8080` | 게이트웨이 주소 |
+| `MODE` | (필수) | 모드별 submit 엔드포인트를 고른다 |
+| `LOAD_RPM` | 20 | `load.js` 도착률 |
+| `DURATION` | 2m | 회차 길이 |
+| `MAX_WAIT_MS` | 60000 | 완료 대기 상한 |
+| `POLL_MAX_MS` | 5000 | 폴링 간격 상한 |
+
+## 커스텀 지표
+
+- `e2e_completion_time` — submit부터 종료 상태까지
+- `polls_per_transaction` — 트랜잭션당 폴링 횟수
+- `timeout_waiting_rate` — 대기 중 타임아웃 비율

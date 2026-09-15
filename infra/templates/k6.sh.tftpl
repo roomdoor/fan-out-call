@@ -1,0 +1,99 @@
+#!/bin/bash
+# C 호스트 — k6 부하 생성기이자 측정 오케스트레이터.
+#
+# 게이트웨이와 같은 호스트에 두지 않는다. maxVUs가 RPM x 10이라
+# 600 RPM이면 6,000 VU고, 이게 CPU를 먹으면 측정 대상을 방해한다.
+# bench.sh가 여기서 돌면서 A(게이트웨이)를 SSM으로 제어한다.
+set -euxo pipefail
+exec > >(tee /var/log/bench-bootstrap.log) 2>&1
+
+# nodejs는 parse.mjs가 쓴다. 없으면 몇 시간짜리 sweep이 끝난 뒤
+# 마지막 단계에서 command not found로 죽는다.
+dnf install -y git jq nodejs awscli-2 || dnf install -y git jq nodejs
+
+# k6 공식 RPM 저장소
+cat > /etc/yum.repos.d/k6.repo <<'REPO'
+[k6]
+name=k6
+baseurl=https://dl.k6.io/rpm
+enabled=1
+gpgcheck=1
+gpgkey=https://dl.k6.io/key.gpg
+REPO
+dnf install -y k6
+
+cat > /etc/sysctl.d/99-bench.conf <<'SYSCTL'
+# VU 하나가 커넥션을 붙잡는다.
+fs.file-max = 2097152
+net.ipv4.ip_local_port_range = 1024 65535
+net.ipv4.tcp_tw_reuse = 1
+SYSCTL
+sysctl --system
+
+# /etc/security/limits.conf 는 pam_limits가 로그인 시점에 적용한다.
+# SSM 세션 워커는 amazon-ssm-agent 서비스의 자식이라 PAM을 거치지 않고
+# 에이전트의 LimitNOFILE(기본 1024)을 물려받는다. bench.sh를 SSM 세션에서
+# 돌리므로 이걸 안 풀면 6,000 VU에서 too many open files가 난다.
+mkdir -p /etc/systemd/system/amazon-ssm-agent.service.d
+cat > /etc/systemd/system/amazon-ssm-agent.service.d/limits.conf <<'DROPIN'
+[Service]
+LimitNOFILE=1048576
+DROPIN
+systemctl daemon-reload
+systemctl restart amazon-ssm-agent || true
+
+cat >> /etc/security/limits.conf <<'LIMITS'
+* soft nofile 1048576
+* hard nofile 1048576
+LIMITS
+
+# bench.sh가 읽는 값들. 클론이 실패해도 환경변수는 남도록 먼저 쓴다.
+cat > /etc/profile.d/bench.sh <<'ENVFILE'
+export BASE_URL="http://__GATEWAY_HOST__:8080"
+export GATEWAY_INSTANCE_ID="__GATEWAY_INSTANCE_ID__"
+export AWS_REGION="__REGION__"
+export MOCK_HOST="__MOCK_HOST__"
+export MOCK_BASE_PORT="__BASE_PORT__"
+export MOCK_SHARD_COUNT="__SHARD_COUNT__"
+# 서비스 드롭인과 별개로, 대화형 셸에서도 확실히 올려둔다.
+ulimit -n 1048576 2>/dev/null || true
+ENVFILE
+
+sed -i \
+  -e "s|__GATEWAY_HOST__|${gateway_host}|" \
+  -e "s|__GATEWAY_INSTANCE_ID__|${gateway_instance_id}|" \
+  -e "s|__REGION__|${region}|" \
+  -e "s|__MOCK_HOST__|${mock_host}|" \
+  -e "s|__BASE_PORT__|${base_port}|" \
+  -e "s|__SHARD_COUNT__|${shard_count}|" \
+  /etc/profile.d/bench.sh
+
+# bench.sh, 시나리오, 파서가 게이트웨이 저장소에 있다.
+# repo_ref가 가리키는 브랜치에 bench.sh가 있어야 한다.
+git clone --depth 1 --branch "${repo_ref}" \
+  https://github.com/roomdoor/fan-out-call.git /opt/fan-out-call
+if [ ! -f /opt/fan-out-call/perf/k6/bench.sh ]; then
+  echo "bench.sh not found on ref '${repo_ref}'. 측정 스크립트가 머지된 ref를 repo_ref로 지정할 것." >&2
+  exit 1
+fi
+chmod +x /opt/fan-out-call/perf/k6/bench.sh
+
+# mock 샤드가 전부 응답하는지 확인한다. 하나라도 못 뜨면 준비 마커를 만들지 않는다.
+for i in $(seq 0 $(( ${shard_count} - 1 ))); do
+  port=$(( ${base_port} + i ))
+  shard_ready=false
+  for _ in $(seq 1 60); do
+    if curl -sf "http://${mock_host}:$${port}/health" >/dev/null; then
+      shard_ready=true
+      break
+    fi
+    sleep 2
+  done
+  if [ "$${shard_ready}" != true ]; then
+    echo "mock shard on port $${port} never became ready" >&2
+    exit 1
+  fi
+done
+
+touch /var/lib/bench-ready
+echo "k6 host ready. run: cd /opt/fan-out-call/perf/k6 && ./bench.sh config/v15-baseline.env"

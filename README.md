@@ -116,11 +116,10 @@ k6 메트릭(`iterations`, `e2e_completion_time`, `timeout_waiting_rate`, `check
 
 | 스크립트 | 용도 |
 | --- | --- |
-| `perf/k6/sweep.sh` | pool:queue 페어 sweep (예: `64:256 128:512 256:1024`) |
-| `perf/k6/load_sweep.sh` | RPM 부하 sweep (`CORE_POOL`, `MAX_POOL`, `QUEUE`, `HIKARI_MAX_POOL`, `MODE` 인자 지원) |
-| `perf/k6/matrix_sweep.sh` | pool×RPM 2차원 matrix sweep |
-| `perf/k6/parse.mjs`, `load_parse.mjs`, `matrix_parse.mjs` | 결과 JSON + 게이트웨이 로그 통합 파싱 → 마크다운 표 |
-| `perf/k6/harness.sh` | mock fleet up/down + 단일 테스트 실행 |
+| `perf/k6/bench.sh` | 측정 오케스트레이터. k6 호스트에서 돌며 게이트웨이 호스트를 SSM으로 제어 |
+| `perf/k6/config/*.env` | 측정 세대 정의. 세대 하나가 파일 하나 |
+| `perf/k6/parse.mjs` | 결과 + manifest 통합 파싱 → 마크다운 표 |
+| `infra/` | 측정용 AWS 3호스트 Terraform |
 
 새 환경에서도 인자 한 줄로 모든 sweep 재현 가능.
 
@@ -210,7 +209,7 @@ submit은 즉시 `202 Accepted`와 `transactionNo`, `requestId` 반환. fan-out�
 
 ## 실행
 
-자세한 셋업 / sweep 사용법은 [`perf/k6/HANDOFF.md`](perf/k6/HANDOFF.md) 참조.
+측정 인프라 구축은 [`infra/README.md`](infra/README.md), 측정 스크립트 사용법은 [`perf/k6/README.md`](perf/k6/README.md) 참조.
 
 ### 빠른 시작
 ```bash
@@ -254,5 +253,6 @@ JDK 25, Docker, k6, Node.js (파서용).
 
 ## 결과 디렉토리 안내
 
-`perf/k6/results/v1~v12/` — 각 세대 raw JSON + REPORT.md.
-`perf/k6/HANDOFF.md` — 새 머신에서 작업 이어받기용 컨텍스트 문서 (인프라 셋업, sweep 명령, 핵심 수치 요약).
+`perf/k6/results/v1~v14/` — 각 세대 raw JSON + REPORT.md.
+
+v1~v14는 게이트웨이·mock·MySQL·k6가 모두 한 macOS 기계에 있던 시절의 측정이다. 각 REPORT.md에 적힌 실행 명령은 당시 측정 스크립트(`load_sweep.sh` 등) 기준이며, 그 스크립트들은 AWS 3호스트 구성으로 옮기면서 `bench.sh` 로 대체됐다. 과거 기록이므로 그대로 둔다.

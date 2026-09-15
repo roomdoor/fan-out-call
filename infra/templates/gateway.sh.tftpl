@@ -1,0 +1,142 @@
+#!/bin/bash
+# A 호스트 — 게이트웨이 + MySQL. 측정 대상이라 이 호스트에는 부하 생성기를 두지 않는다.
+set -euxo pipefail
+exec > >(tee /var/log/bench-bootstrap.log) 2>&1
+
+dnf install -y docker awscli-2 || dnf install -y docker
+systemctl enable --now docker
+
+# sysctl -w 는 재부팅이나 인스턴스 stop/start에서 사라진다. 그러면 같은
+# manifest 조건으로 기록되면서 실제로는 기본값 커널에서 측정된다.
+# 이 측정 스크립트가 막으려는 "조건을 모르는 측정"이 바로 그것이라 파일로 남긴다.
+cat > /etc/sysctl.d/99-bench.conf <<'SYSCTL'
+# blocking 모드는 pool 크기가 곧 천장이다(RPM ~ pool / 9).
+# macOS의 kern.num_taskthreads=2048 때문에 로컬에서는 pool 1700이 상한이었다.
+kernel.threads-max = 4194304
+kernel.pid_max = 4194304
+fs.file-max = 2097152
+vm.max_map_count = 1048576
+
+# 은행 50곳으로 나가는 동시 커넥션이 9 x RPM 규모다.
+net.ipv4.ip_local_port_range = 1024 65535
+net.core.somaxconn = 65535
+net.ipv4.tcp_max_syn_backlog = 65535
+net.ipv4.tcp_tw_reuse = 1
+SYSCTL
+sysctl --system
+
+DB_PASSWORD="$(aws ssm get-parameter \
+  --region '${region}' \
+  --name '${db_param}' \
+  --with-decryption \
+  --query 'Parameter.Value' --output text)"
+
+# MySQL은 루프백에만 바인딩한다. 이 호스트 안에서만 쓰이므로
+# 보안 그룹에 3306 인바운드 규칙도 만들지 않았다. 방어가 이중이 된다.
+docker run -d \
+  --name mysql \
+  --restart unless-stopped \
+  -p 127.0.0.1:3306:3306 \
+  -e MYSQL_ROOT_PASSWORD="$${DB_PASSWORD}" \
+  -e MYSQL_DATABASE=loan_limit_gateway \
+  mysql:8.4 \
+  --character-set-server=utf8mb4 \
+  --collation-server=utf8mb4_unicode_ci \
+  --default-time-zone=+09:00
+
+mysql_ready=false
+for _ in $(seq 1 90); do
+  if docker exec mysql mysqladmin ping -uroot -p"$${DB_PASSWORD}" --silent 2>/dev/null; then
+    mysql_ready=true
+    break
+  fi
+  sleep 2
+done
+if [ "$${mysql_ready}" != true ]; then
+  echo "MySQL never became ready" >&2
+  exit 1
+fi
+
+umask 077
+printf '%s' "$${DB_PASSWORD}" > /etc/bench-db-password
+
+docker pull "${image}"
+
+# 측정 스크립트가 회차마다 pool/queue를 바꿔가며 게이트웨이를 재기동한다.
+# 그래서 여기서는 띄우지 않고, 재기동용 헬퍼만 깔아둔다.
+# 받은 인자는 그대로 Spring 인자가 된다.
+cat > /usr/local/bin/gateway-run.sh <<'SCRIPT'
+#!/bin/bash
+set -euo pipefail
+
+docker rm -f gateway 2>/dev/null || true
+
+# JVM 플래그는 JAVA_TOOL_OPTIONS로 넘긴다.
+#   JAVA_TOOL_OPTIONS="-Dkotlinx.coroutines.io.parallelism=192" gateway-run.sh --app...=1700
+docker run -d \
+  --name gateway \
+  --network host \
+  --ulimit nofile=1048576:1048576 \
+  --ulimit nproc=4194304:4194304 \
+  -e JAVA_TOOL_OPTIONS="$${JAVA_TOOL_OPTIONS:-}" \
+  -e SPRING_DATASOURCE_URL="jdbc:mysql://127.0.0.1:3306/loan_limit_gateway?serverTimezone=Asia/Seoul&characterEncoding=UTF-8" \
+  -e SPRING_DATASOURCE_USERNAME=root \
+  -e SPRING_DATASOURCE_PASSWORD="$(cat /etc/bench-db-password)" \
+  __IMAGE__ \
+  --app.web-client-fan-out.routing-mode=sharded \
+  --app.web-client-fan-out.mock-base-url="http://__MOCK_HOST__:__BASE_PORT__" \
+  --app.web-client-fan-out.sharded-mock-routing.base-port=__BASE_PORT__ \
+  --app.web-client-fan-out.sharded-mock-routing.shard-count=__SHARD_COUNT__ \
+  "$@"
+
+for _ in $(seq 1 120); do
+  if [ "$(curl -sf http://localhost:8080/actuator/health | sed -n 's/.*"status":"\([A-Z]*\)".*/\1/p')" = "UP" ]; then
+    echo "gateway UP"
+    exit 0
+  fi
+  if ! docker ps --format '{{.Names}}' | grep -qx gateway; then
+    echo "gateway died:" >&2
+    docker logs --tail 50 gateway >&2
+    exit 1
+  fi
+  sleep 1
+done
+
+echo "gateway never reported UP" >&2
+docker logs --tail 50 gateway >&2
+exit 1
+SCRIPT
+
+# 힌트 문자열을 실제 값으로 치환한다. 헬퍼 안에서 Terraform 보간과
+# 셸 확장이 섞이지 않게 하려고 한 단계 미뤄서 넣는다.
+sed -i \
+  -e "s|__IMAGE__|${image}|" \
+  -e "s|__MOCK_HOST__|${mock_host}|" \
+  -e "s|__BASE_PORT__|${base_port}|g" \
+  -e "s|__SHARD_COUNT__|${shard_count}|" \
+  /usr/local/bin/gateway-run.sh
+
+chmod +x /usr/local/bin/gateway-run.sh
+
+# 샤드 하나만 보고 넘어가면, 느리게 뜬 샤드로 나간 호출이 PARTIAL이 되고
+# 그 원인이 게이트웨이로 잘못 귀속된다. 전부 확인한다.
+for i in $(seq 0 $(( ${shard_count} - 1 ))); do
+  port=$(( ${base_port} + i ))
+  shard_ready=false
+  for _ in $(seq 1 120); do
+    if curl -sf "http://${mock_host}:$${port}/health" >/dev/null; then
+      shard_ready=true
+      break
+    fi
+    sleep 2
+  done
+  if [ "$${shard_ready}" != true ]; then
+    echo "mock shard on port $${port} never became ready" >&2
+    exit 1
+  fi
+done
+
+# 여기까지 왔다는 건 MySQL과 전 샤드가 준비됐다는 뜻이다.
+# 실패 시 exit 했으므로 이 마커는 성공했을 때만 생긴다.
+touch /var/lib/bench-ready
+echo "gateway host ready. start with: sudo gateway-run.sh --app.async-thread-pool.core-pool-size=1700"
