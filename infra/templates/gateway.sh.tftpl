@@ -8,7 +8,7 @@ systemctl enable --now docker
 
 # sysctl -w 는 재부팅이나 인스턴스 stop/start에서 사라진다. 그러면 같은
 # manifest 조건으로 기록되면서 실제로는 기본값 커널에서 측정된다.
-# 이 하네스가 막으려는 "조건을 모르는 측정"이 바로 그것이라 파일로 남긴다.
+# 이 측정 스크립트가 막으려는 "조건을 모르는 측정"이 바로 그것이라 파일로 남긴다.
 cat > /etc/sysctl.d/99-bench.conf <<'SYSCTL'
 # blocking 모드는 pool 크기가 곧 천장이다(RPM ~ pool / 9).
 # macOS의 kern.num_taskthreads=2048 때문에 로컬에서는 pool 1700이 상한이었다.

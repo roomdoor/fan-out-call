@@ -209,7 +209,7 @@ submit은 즉시 `202 Accepted`와 `transactionNo`, `requestId` 반환. fan-out�
 
 ## 실행
 
-측정 인프라 구축은 [`infra/README.md`](infra/README.md), 하네스 사용법은 [`perf/k6/README.md`](perf/k6/README.md) 참조.
+측정 인프라 구축은 [`infra/README.md`](infra/README.md), 측정 스크립트 사용법은 [`perf/k6/README.md`](perf/k6/README.md) 참조.
 
 ### 빠른 시작
 ```bash
@@ -255,4 +255,4 @@ JDK 25, Docker, k6, Node.js (파서용).
 
 `perf/k6/results/v1~v14/` — 각 세대 raw JSON + REPORT.md.
 
-v1~v14는 게이트웨이·mock·MySQL·k6가 모두 한 macOS 기계에 있던 시절의 측정이다. 각 REPORT.md에 적힌 실행 명령은 당시 하네스(`load_sweep.sh` 등) 기준이며, 그 스크립트들은 AWS 3호스트 구성으로 옮기면서 `bench.sh` 로 대체됐다. 과거 기록이므로 그대로 둔다.
+v1~v14는 게이트웨이·mock·MySQL·k6가 모두 한 macOS 기계에 있던 시절의 측정이다. 각 REPORT.md에 적힌 실행 명령은 당시 측정 스크립트(`load_sweep.sh` 등) 기준이며, 그 스크립트들은 AWS 3호스트 구성으로 옮기면서 `bench.sh` 로 대체됐다. 과거 기록이므로 그대로 둔다.

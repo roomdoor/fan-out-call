@@ -73,7 +73,7 @@ sed -i \
 git clone --depth 1 --branch "${repo_ref}" \
   https://github.com/roomdoor/fan-out-call.git /opt/fan-out-call
 if [ ! -f /opt/fan-out-call/perf/k6/bench.sh ]; then
-  echo "bench.sh not found on ref '${repo_ref}'. 하네스가 머지된 ref를 repo_ref로 지정할 것." >&2
+  echo "bench.sh not found on ref '${repo_ref}'. 측정 스크립트가 머지된 ref를 repo_ref로 지정할 것." >&2
   exit 1
 fi
 chmod +x /opt/fan-out-call/perf/k6/bench.sh
