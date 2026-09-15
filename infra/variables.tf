@@ -76,6 +76,12 @@ variable "mock_latency" {
   }
 }
 
+variable "repo_ref" {
+  description = "C 호스트가 클론할 게이트웨이 저장소의 브랜치/태그. bench.sh와 시나리오가 여기서 온다."
+  type        = string
+  default     = "main"
+}
+
 variable "root_volume_gb" {
   description = "루트 볼륨 크기. 게이트웨이 이미지가 500MB를 넘고 로그도 쌓인다."
   type        = number

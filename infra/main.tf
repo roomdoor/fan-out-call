@@ -218,6 +218,34 @@ resource "aws_iam_instance_profile" "instance" {
   role = aws_iam_role.instance.name
 }
 
+# bench.sh는 C(k6)에서 돌면서 A(게이트웨이)를 SSM으로 제어한다.
+# 회차마다 게이트웨이를 재기동하고 로그 카운트를 받아오기 위한 권한이다.
+# 대상은 이 스택의 인스턴스와 RunShellScript 문서로 한정한다.
+data "aws_region" "current" {}
+data "aws_caller_identity" "current" {}
+
+data "aws_iam_policy_document" "bench_control" {
+  statement {
+    actions = ["ssm:SendCommand"]
+    resources = [
+      aws_instance.gateway.arn,
+      "arn:aws:ssm:${data.aws_region.current.name}::document/AWS-RunShellScript",
+    ]
+  }
+
+  # 명령 결과 조회는 리소스 단위 제한을 지원하지 않는다.
+  statement {
+    actions   = ["ssm:GetCommandInvocation", "ssm:ListCommandInvocations"]
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_role_policy" "bench_control" {
+  name   = "${var.name_prefix}-bench-control"
+  role   = aws_iam_role.instance.id
+  policy = data.aws_iam_policy_document.bench_control.json
+}
+
 # ---------------------------------------------------------------------------
 # 인스턴스
 #
@@ -285,10 +313,13 @@ resource "aws_instance" "k6" {
   }
 
   user_data = templatefile("${path.module}/templates/k6.sh.tftpl", {
-    gateway_host = aws_instance.gateway.private_ip
-    mock_host    = aws_instance.mock.private_ip
-    base_port    = var.mock_base_port
-    shard_count  = var.mock_shard_count
+    gateway_host        = aws_instance.gateway.private_ip
+    gateway_instance_id = aws_instance.gateway.id
+    mock_host           = aws_instance.mock.private_ip
+    base_port           = var.mock_base_port
+    shard_count         = var.mock_shard_count
+    region              = var.region
+    repo_ref            = var.repo_ref
   })
 
   depends_on = [aws_instance.gateway]
