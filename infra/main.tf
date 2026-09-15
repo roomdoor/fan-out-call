@@ -21,10 +21,24 @@ provider "aws" {
   }
 }
 
-# MySQL 비밀번호는 매 apply마다 새로 만든다. 저장소에 들어가지 않는다.
+# MySQL 비밀번호. 저장소에는 들어가지 않는다.
+# state에는 평문으로 저장되므로 infra/.gitignore가 tfstate를 막고 있다.
+# destroy/recreate 전까지는 같은 값이 유지된다(keepers 미사용).
 resource "random_password" "db" {
   length  = 32
   special = false
+}
+
+# 비밀번호를 user-data에 넣지 않는다. user-data는 인스턴스의 모든 프로세스가
+# IMDS(169.254.169.254/latest/user-data)로 읽을 수 있고, 게이트웨이 컨테이너는
+# --network host로 돌기 때문에 그 안에서도 읽힌다. ec2:DescribeInstanceAttribute
+# 권한자도 볼 수 있다. SecureString으로 두고 부팅 때 받아간다.
+resource "aws_ssm_parameter" "db_password" {
+  name  = "/${var.name_prefix}/db-password"
+  type  = "SecureString"
+  value = random_password.db.result
+
+  tags = { Name = "${var.name_prefix}-db-password" }
 }
 
 data "aws_availability_zones" "available" {
@@ -94,18 +108,14 @@ resource "aws_route_table_association" "public" {
 # 루프백에만 바인딩되므로 인바운드 규칙 자체가 필요 없다.
 # ---------------------------------------------------------------------------
 
+# 인라인 ingress/egress 블록과 standalone rule 리소스를 같은 보안 그룹에
+# 섞으면 안 된다. 섞으면 refresh가 실제 규칙을 인라인 속성으로 읽어들이고,
+# 설정에는 없으므로 다음 apply가 그 규칙을 지운다. 측정 도중에 끊긴다.
+# 그래서 egress도 전부 standalone으로 둔다.
 resource "aws_security_group" "gateway" {
   name        = "${var.name_prefix}-gateway"
   description = "A host - gateway"
   vpc_id      = aws_vpc.this.id
-
-  egress {
-    description = "GHCR pull, SSM, yum"
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
 
   tags = { Name = "${var.name_prefix}-gateway" }
 }
@@ -115,13 +125,6 @@ resource "aws_security_group" "mock" {
   description = "B host - mock fleet"
   vpc_id      = aws_vpc.this.id
 
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
   tags = { Name = "${var.name_prefix}-mock" }
 }
 
@@ -130,14 +133,21 @@ resource "aws_security_group" "k6" {
   description = "C host - load generator"
   vpc_id      = aws_vpc.this.id
 
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
+  tags = { Name = "${var.name_prefix}-k6" }
+}
+
+# GHCR pull, SSM, dnf
+resource "aws_vpc_security_group_egress_rule" "all" {
+  for_each = {
+    gateway = aws_security_group.gateway.id
+    mock    = aws_security_group.mock.id
+    k6      = aws_security_group.k6.id
   }
 
-  tags = { Name = "${var.name_prefix}-k6" }
+  security_group_id = each.value
+  cidr_ipv4         = "0.0.0.0/0"
+  ip_protocol       = "-1"
+  description       = "GHCR pull, SSM, dnf"
 }
 
 # k6 -> 게이트웨이 (submit, polling, actuator)
@@ -238,6 +248,29 @@ data "aws_iam_policy_document" "bench_control" {
     actions   = ["ssm:GetCommandInvocation", "ssm:ListCommandInvocations"]
     resources = ["*"]
   }
+
+}
+
+# 비밀번호 읽기는 별도 정책으로 둔다. bench_control은 게이트웨이 ARN을
+# 참조하므로, 게이트웨이가 그 정책에 depends_on 하면 순환이 생긴다.
+# 이 정책은 인스턴스를 참조하지 않으므로 순환 없이 먼저 만들 수 있다.
+data "aws_iam_policy_document" "param_read" {
+  statement {
+    actions   = ["ssm:GetParameter"]
+    resources = [aws_ssm_parameter.db_password.arn]
+  }
+
+  # SecureString 복호화. 계정 기본 SSM 키로만 제한한다.
+  statement {
+    actions   = ["kms:Decrypt"]
+    resources = ["arn:aws:kms:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:alias/aws/ssm"]
+  }
+}
+
+resource "aws_iam_role_policy" "param_read" {
+  name   = "${var.name_prefix}-param-read"
+  role   = aws_iam_role.instance.id
+  policy = data.aws_iam_policy_document.param_read.json
 }
 
 resource "aws_iam_role_policy" "bench_control" {
@@ -292,10 +325,12 @@ resource "aws_instance" "gateway" {
     mock_host   = aws_instance.mock.private_ip
     base_port   = var.mock_base_port
     shard_count = var.mock_shard_count
-    db_password = random_password.db.result
+    db_param    = aws_ssm_parameter.db_password.name
+    region      = var.region
   })
 
-  depends_on = [aws_instance.mock]
+  # 부팅 직후 SSM에서 비밀번호를 받아가므로 정책이 먼저 있어야 한다.
+  depends_on = [aws_instance.mock, aws_iam_role_policy.param_read]
 
   tags = { Name = "${var.name_prefix}-gateway" }
 }

@@ -22,7 +22,8 @@ k6를 B와 합치지 않는 이유는, k6가 CPU를 먹으면 mock 응답이 느
 
 - `terraform` >= 1.6, `aws` CLI
 - AWS 자격증명 (`aws configure` 또는 `AWS_PROFILE`)
-- **GHCR 패키지 두 개가 public 이어야 한다.** 저장소가 public이어도 패키지는 private으로 생성된다. 각 저장소 → Packages → Package settings → Change visibility → Public
+- **GHCR 패키지 두 개가 public 이어야 한다.** 저장소가 public이어도 패키지는 private으로 생성될 수 있다. 각 저장소 → Packages → Package settings → Change visibility → Public
+- **`repo_ref` 가 가리키는 ref에 `perf/k6/bench.sh` 가 있어야 한다.** C 호스트가 그 ref를 클론해서 하네스를 얻는다. 기본값은 `main` 이므로, 하네스가 아직 머지되지 않았다면 `-var repo_ref=<브랜치>` 로 지정할 것. 없으면 부트스트랩이 중단되고 `/var/lib/bench-ready` 가 생기지 않는다.
 
 ## 사용
 
@@ -50,7 +51,11 @@ aws ssm start-session --target <instance-id> --region ap-northeast-2
 
 **3306 인바운드 규칙이 없다.** MySQL은 A 호스트 안에서만 쓰이고 `127.0.0.1:3306` 에만 바인딩된다. 외부 접근 경로 자체를 만들지 않았다.
 
-**MySQL 비밀번호는 `apply` 마다 새로 생성한다.** 저장소에 들어가지 않는다. `terraform output -raw db_password` 로 볼 수 있다.
+**MySQL 비밀번호는 저장소에 들어가지 않는다.** `random_password` 로 만들어 SSM Parameter Store에 `SecureString` 으로 두고, A 호스트가 부팅 때 받아간다. `terraform output -raw db_password` 로 볼 수 있다.
+
+user-data에 넣지 않는 이유는, user-data가 인스턴스의 모든 프로세스에서 `169.254.169.254/latest/user-data` 로 읽히기 때문이다. 게이트웨이 컨테이너는 `--network host` 로 돌므로 그 안에서도 읽힌다.
+
+값은 `destroy` 후 재생성 전까지 유지된다(`keepers` 미사용). state에는 평문으로 저장되므로 `.gitignore` 가 `tfstate` 를 막고 있다.
 
 **x86 전용이다.** Graviton(arm64)이 더 싸지만 GHCR 이미지가 amd64 단일이라 에뮬레이션이 걸리고, JVM 기동과 스케줄링이 왜곡되어 측정값이 오염된다. 인스턴스 타입을 arm64로 바꾸려면 이미지 빌드도 멀티아치로 바꿔야 한다.
 

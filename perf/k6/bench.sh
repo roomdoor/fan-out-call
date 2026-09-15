@@ -37,6 +37,8 @@ REPEATS="${REPEATS:-1}"
 DURATION="${DURATION:-2m}"
 MAX_WAIT_MS="${MAX_WAIT_MS:-120000}"
 POLL_MAX_MS="${POLL_MAX_MS:-5000}"
+# 이론 하한이 31초다. 로그 카운트 전에 남은 트랜잭션이 끝날 시간을 준다.
+DRAIN_SECONDS="${DRAIN_SECONDS:-45}"
 JAVA_OPTS="${JAVA_OPTS:-}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
 
@@ -63,6 +65,7 @@ ssm_run() {
     --parameters "${params}" \
     --query 'Command.CommandId' --output text)"
 
+  local done=false
   for _ in $(seq 1 300); do
     status="$(aws ssm get-command-invocation \
       --region "${AWS_REGION}" \
@@ -70,7 +73,7 @@ ssm_run() {
       --instance-id "${instance}" \
       --query 'Status' --output text 2>/dev/null || echo Pending)"
     case "${status}" in
-      Success) break ;;
+      Success) done=true; break ;;
       Failed|Cancelled|TimedOut)
         echo "SSM command ${status}:" >&2
         aws ssm get-command-invocation --region "${AWS_REGION}" \
@@ -81,6 +84,14 @@ ssm_run() {
     esac
     sleep 2
   done
+
+  # 폴링이 끝났는데 Success가 아니면 실패로 처리한다. 그냥 빠져나가면
+  # 부분 출력이 정상 결과처럼 반환되고, 뜨지도 않은 게이트웨이에
+  # k6를 돌려서 그 숫자가 유효한 회차로 기록된다.
+  if [ "${done}" != true ]; then
+    echo "SSM command did not finish in time (last status: ${status})" >&2
+    return 1
+  fi
 
   aws ssm get-command-invocation \
     --region "${AWS_REGION}" \
@@ -184,8 +195,24 @@ for pool in ${POOLS}; do
         k6 run --summary-export="${summary_file}" load.js ) || \
         echo "k6 exited non-zero for ${run_id} (continuing)" >&2
 
-      counts="$(collect_counts "${run_id}")"
-      stop_gateway
+      # k6는 DURATION + gracefulStop에서 멈추지만 트랜잭션 e2e가 최소 31초다.
+      # 막바지에 submit된 건들은 아직 COMPLETED 로그를 남기지 않았다.
+      # 바로 세면 처리율이 체계적으로 낮게 나온다.
+      echo "draining in-flight transactions (${DRAIN_SECONDS}s)..."
+      sleep "${DRAIN_SECONDS}"
+
+      # SSM 일시 장애로 sweep 전체를 잃지 않는다. k6 실패를 넘기는 것과 같은 기준.
+      counts="$(collect_counts "${run_id}")" || counts=""
+      # --output text 는 빈 출력을 문자열 None으로 준다. jq --argjson이 죽는다.
+      case "${counts}" in
+        ''|None|null) counts="null" ;;
+      esac
+      if ! echo "${counts}" | jq -e . >/dev/null 2>&1; then
+        echo "count collection returned unusable output for ${run_id}" >&2
+        counts="null"
+      fi
+
+      stop_gateway || true
 
       # 이 회차를 재현하는 데 필요한 모든 것을 결과 옆에 남긴다.
       jq -n \
@@ -200,7 +227,7 @@ for pool in ${POOLS}; do
         --arg spring_args "${pool_args} ${EXTRA_ARGS}" \
         --arg image "${digest}" \
         --arg started_at "${started_at}" \
-        --argjson counts "${counts:-null}" \
+        --argjson counts "${counts}" \
         '{config:$config, run_id:$run_id, mode:$mode, pool:$pool, rpm:$rpm, repeat:$rep,
           duration:$duration, java_opts:$java_opts, spring_args:$spring_args,
           gateway_image:$image, started_at:$started_at, gateway_counts:$counts}' \

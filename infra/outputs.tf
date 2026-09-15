@@ -39,18 +39,17 @@ output "next_steps" {
        aws ssm start-session --target ${aws_instance.gateway.id} --region ${var.region}
        ls /var/lib/bench-ready && tail /var/log/bench-bootstrap.log
 
-    2) 게이트웨이 기동 (A 호스트에서)
-       SSM 접속 기본 사용자는 ssm-user(비root)다. docker 실행과 DB 비밀번호
-       파일 읽기에 root가 필요하므로 sudo로 돌린다.
+    2) 측정 실행 (C 호스트에서)
+       bench.sh가 회차마다 게이트웨이를 SSM으로 재기동하고, k6를 돌리고,
+       로그 카운트를 받아 manifest.json에 조건과 함께 남긴다.
+       게이트웨이를 손으로 띄울 필요 없다 — 첫 회차에서 어차피 재기동된다.
 
-       sudo JAVA_TOOL_OPTIONS="-Dkotlinx.coroutines.io.parallelism=192" \
-         gateway-run.sh --app.async-thread-pool.core-pool-size=1700 \
-                        --app.async-thread-pool.max-pool-size=1700 \
-                        --app.async-thread-pool.queue-capacity=200
-
-    3) 부하 실행 (C 호스트에서, BASE_URL은 이미 환경변수로 설정됨)
+       aws ssm start-session --target ${aws_instance.k6.id} --region ${var.region}
        cd /opt/fan-out-call/perf/k6
-       MODE=coroutine LOAD_RPM=100 DURATION=2m k6 run load.js
+       ./bench.sh config/v15-baseline.env
+
+    3) 결과 보기
+       node parse.mjs results/v15-baseline
 
     4) 측정 끝나면 반드시
        terraform destroy
