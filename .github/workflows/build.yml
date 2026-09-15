@@ -57,6 +57,9 @@ jobs:
             type=sha,format=long
             type=raw,value=latest,enable={{is_default_branch}}
 
+      # linux/amd64 단일 아키텍처는 의도된 선택이다. 측정 인스턴스를 x86(c7i 계열)으로
+      # 확정했고, arm64 이미지를 만들어 에뮬레이션으로 돌리면 JVM 기동과 스케줄링이
+      # 왜곡되어 처리량 측정값이 오염된다. 멀티아치 빌드를 추가하지 말 것.
       - name: Build and push image
         uses: docker/build-push-action@v6
         with:
