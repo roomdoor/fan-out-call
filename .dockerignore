@@ -1,0 +1,5 @@
+*
+!build/libs/loan-limit-gateway-*.jar
+# Spring Boot가 같이 만드는 plain jar는 제외한다.
+# 남겨두면 Dockerfile의 COPY 글로브가 파일 두 개를 잡아 빌드가 깨진다.
+build/libs/*-plain.jar
