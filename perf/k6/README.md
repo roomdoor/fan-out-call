@@ -73,9 +73,13 @@ pool 512/1024 회차가 `io.parallelism` 기본값 차이로 교란됐던 것이
 | --- | --- |
 | `Background fan-out completed ... status=COMPLETED` | 50/50 전부 성공 |
 | `Background fan-out completed ... status=PARTIAL_FAILURE` | 일부 은행만 성공 |
+| `Background fan-out completed ... status=FAILED` | fan-out은 끝났으나 성공한 은행이 0 (전 은행 거부 등) |
+| `Run marked as FAILED` | fan-out 자체가 예외로 중단됨 |
 | `Bank call submission rejected bankCode=` | 풀이 그 은행 호출을 거부 |
 | `Result persistence failed bankCode=` | 그 은행 결과를 DB에 저장 실패 |
-| `Run marked as FAILED` | run 수준 실패 (fan-out 자체가 끝나지 못함) |
+
+앞의 세 `status=` 행이 서로 배타적이고 합이 run 수와 같다. `Run marked as FAILED`는
+그 앞 단계에서 터진 경우라 별도로 센다.
 
 **거부와 저장 실패는 은행 단위로 집계한다.** 실패가 한 은행에 갇히도록
 고쳐서(`LoanLimitQueryOrchestrator`, `AsyncThreadPoolBankFanOutExecutor`)

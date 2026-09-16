@@ -4,6 +4,7 @@ import com.example.loanlimit.config.AppProperties
 import com.example.loanlimit.fanout.BankFanOutExecutor
 import com.example.loanlimit.loanlimitbatchrun.dto.request.LoanLimitQueryRequest
 import com.example.loanlimit.bankcallresult.entity.BankCallResult
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -12,6 +13,7 @@ import kotlinx.coroutines.future.await
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Component
 import java.time.LocalDateTime
+import java.util.concurrent.RejectedExecutionException
 
 @Component
 class AsyncThreadPoolBankFanOutExecutor(
@@ -54,9 +56,19 @@ class AsyncThreadPoolBankFanOutExecutor(
                     // 거부된 것이므로 그 은행의 실패로 기록한다.
                     val result = try {
                         asyncBankCallWorker.call(runId, bank, request).await()
+                    } catch (e: CancellationException) {
+                        // 취소는 실패가 아니다. 삼키면 진행 중인 호출이
+                        // REJECTED 행으로 기록되고 취소가 전파되지 않는다.
+                        throw e
+                    } catch (e: RejectedExecutionException) {
+                        log.warn("Bank call submission rejected bankCode=$bank message=${e.message}")
+                        failureResult(runId, bank, "REJECTED", "Executor rejected bank call", e)
                     } catch (e: Exception) {
-                        log.warn("Bank call submission rejected bankCode=$bank errorType=${e::class.simpleName} message=${e.message}")
-                        rejectedResult(runId, bank, e)
+                        // 거부가 아닌 제출 단계 실패(알 수 없는 은행 코드, 요청 직렬화 등).
+                        // 독립성은 유지하되 REJECTED와 섞지 않는다 — 섞으면
+                        // 거부 카운트가 설정 오류까지 세게 된다.
+                        log.warn("Bank call submission failed bankCode=$bank errorType=${e::class.simpleName} message=${e.message}")
+                        failureResult(runId, bank, "EXCEPTION", "Bank call submission failed", e)
                     }
                     onEachResult(result)
                 }
@@ -66,23 +78,28 @@ class AsyncThreadPoolBankFanOutExecutor(
         log.info("Async-threadpool fan-out finished bankCount=${banks.size}")
     }
 
-    // 제출 자체가 거부된 은행. 요청을 만들기 전이라 payload는 비어 있다.
-    // responseCode를 EXCEPTION과 구분해 두면 로그에서 풀 거부를 따로 셀 수 있다.
-    private fun rejectedResult(
+    // 제출 단계에서 끝난 은행. 호출을 보내기 전이라 payload는 비어 있다.
+    private fun failureResult(
         runId: Long,
         bankCode: String,
+        responseCode: String,
+        responseMessage: String,
         e: Exception,
     ): BankCallResult {
         val now = LocalDateTime.now()
+        // 이 함수가 던지면 격리가 깨져 형제 코루틴이 취소된다. 호스트 해석은
+        // 은행 코드 형식을 검증하므로 실패할 수 있어 안전하게 처리한다.
+        val host = runCatching { appProperties.webClientFanOut.resolveMockBaseUrl(bankCode) }
+            .getOrDefault("unresolved")
         return BankCallResult(
             runId = runId,
             bankCode = bankCode,
-            host = appProperties.webClientFanOut.resolveMockBaseUrl(bankCode),
+            host = host,
             url = "/api/v1/mock-external/banks/$bankCode/loan-limit",
             httpStatus = null,
             success = false,
-            responseCode = "REJECTED",
-            responseMessage = "Executor rejected bank call",
+            responseCode = responseCode,
+            responseMessage = responseMessage,
             approvedLimit = null,
             latencyMs = 0,
             errorDetail = e.message,

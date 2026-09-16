@@ -6,6 +6,7 @@ import com.example.loanlimit.loanlimitbatchrun.dto.response.LoanLimitQueryRespon
 import com.example.loanlimit.fanout.BankFanOutExecutor
 import com.example.loanlimit.fanout.BankFanOutExecutorRegistry
 import com.example.loanlimit.bankcallresult.service.BankCatalogService
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -113,11 +114,17 @@ class LoanLimitQueryOrchestrator(
                 banks = banks,
                 request = request,
             ) { result ->
-                runCatching { bankCallResultService.persistResultWithRetry(result) }
-                    .onFailure { e ->
-                        persistFailures.incrementAndGet()
-                        log.error("Result persistence failed bankCode=${result.bankCode}", e)
-                    }
+                try {
+                    bankCallResultService.persistResultWithRetry(result)
+                } catch (e: CancellationException) {
+                    // 취소는 저장 실패가 아니다. 삼키면 persist_failures가 부풀어
+                    // "DB가 병목이었다"는 잘못된 신호가 되고, 취소가 전파되지 않아
+                    // sequential 모드는 남은 은행을 끝까지 호출하게 된다.
+                    throw e
+                } catch (e: Exception) {
+                    persistFailures.incrementAndGet()
+                    log.error("Result persistence failed bankCode=${result.bankCode}", e)
+                }
             }
 
             val failedPersists = persistFailures.get()
