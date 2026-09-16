@@ -2,7 +2,6 @@ package com.example.loanlimit.fanout.webclient
 
 import com.example.loanlimit.config.AppProperties
 import com.example.loanlimit.fanout.BankFanOutExecutor
-import com.example.loanlimit.bankcallresult.dto.MockExternalCallResult
 import com.example.loanlimit.bankcallresult.entity.BankCallResult
 import com.example.loanlimit.loanlimitbatchrun.dto.request.LoanLimitQueryRequest
 import com.example.loanlimit.bank.BankApiServiceRegistry
@@ -12,10 +11,7 @@ import kotlinx.coroutines.reactor.mono
 import kotlinx.coroutines.slf4j.MDCContext
 import org.slf4j.LoggerFactory
 import org.slf4j.MDC
-import org.springframework.beans.factory.annotation.Qualifier
 import org.springframework.stereotype.Component
-import org.springframework.web.reactive.function.client.WebClient
-import org.springframework.web.reactive.function.client.bodyToMono
 import reactor.core.publisher.Flux
 import reactor.core.publisher.Mono
 import java.time.Duration
@@ -27,7 +23,6 @@ import com.example.loanlimit.logging.MdcKeys
 @Component
 class WebClientBankFanOutExecutor(
     private val appProperties: AppProperties,
-    @Qualifier("sharedBankWebClient") private val webClient: WebClient,
     private val bankApiServiceRegistry: BankApiServiceRegistry,
 ) : BankFanOutExecutor {
 
@@ -69,13 +64,12 @@ class WebClientBankFanOutExecutor(
         bankCode: String,
         request: LoanLimitQueryRequest,
     ): Mono<BankCallResult> {
-        val bankApiPath = "/api/v1/mock-external/banks/$bankCode/loan-limit"
         val requestedAt = LocalDateTime.now()
         val started = Instant.now()
 
         // 호출은 다른 모드와 같은 ExternalBankApiService를 쓴다. 이 모드만
-        // webClient.post()를 직접 만들고 있어서 공유 커넥션 풀 설정이
-        // 적용되지 않던 문제가 있었다.
+        // webClient.post()로 URL과 타임아웃을 따로 조립하고 있었다.
+        // (커넥션 풀은 이미 sharedBankWebClient로 공유하고 있었다.)
         //
         // 다만 mono { callApiNonBlocking(...) } 로 감싸면 안 된다. 호출마다
         // 코루틴 디스패처를 한 번 거치게 되어 이 모드가 coroutine 모드와

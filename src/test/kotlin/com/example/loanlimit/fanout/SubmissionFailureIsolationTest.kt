@@ -67,7 +67,7 @@ class SubmissionFailureIsolationTest {
 
     @Test
     fun `webclient - 알 수 없는 은행이 Flux 전체를 끝내지 않는다`() {
-        val executor = WebClientBankFanOutExecutor(properties, WebClient.builder().build(), registry)
+        val executor = WebClientBankFanOutExecutor(properties, registry)
 
         assertEquals(banks.size, collect { onEach -> executor.execute(RUN_ID, banks, request, onEach) }.size)
     }

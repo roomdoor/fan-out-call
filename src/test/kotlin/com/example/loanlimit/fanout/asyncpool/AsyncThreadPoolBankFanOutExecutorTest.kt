@@ -27,8 +27,8 @@ class AsyncThreadPoolBankFanOutExecutorTest {
 
     private val banks = listOf("BANK-01", "BANK-02", "BANK-03")
 
-    // 실패 행 생성이 레지스트리로 옮겨졌다. 카탈로그에 이 은행들이 있어야
-    // host가 샤드 기준으로 채워진다.
+    // 실패 행 생성이 레지스트리로 옮겨졌다. host 자체의 동작은
+    // FailureEntityHostTest 가 본다.
     private val registry = BankApiServiceRegistry(
         bankCatalogService = BankCatalogService(AppProperties()),
         appProperties = AppProperties(),
