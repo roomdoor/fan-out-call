@@ -25,6 +25,13 @@ net.ipv4.tcp_tw_reuse = 1
 SYSCTL
 sysctl --system
 
+# 여기부터 비밀번호를 다룬다. set -x 가 켜져 있으면 bash xtrace가
+# "+ DB_PASSWORD=<평문>" 을 찍고, exec > >(tee ...) 때문에
+# /var/log/bench-bootstrap.log(0644)와 /var/log/cloud-init-output.log에
+# 남는다. ssm-user도 컨테이너도 읽을 수 있어, 비밀번호를 user-data에서
+# 빼내려고 SecureString을 도입한 의미가 사라진다.
+set +x
+
 DB_PASSWORD="$(aws ssm get-parameter \
   --region '${region}' \
   --name '${db_param}' \
@@ -46,7 +53,8 @@ docker run -d \
 
 mysql_ready=false
 for _ in $(seq 1 90); do
-  if docker exec mysql mysqladmin ping -uroot -p"$${DB_PASSWORD}" --silent 2>/dev/null; then
+  # -p로 넘기면 호스트 프로세스 목록(ps)에 평문이 보인다. MYSQL_PWD로 준다.
+  if docker exec -e MYSQL_PWD="$${DB_PASSWORD}" mysql mysqladmin ping -uroot --silent 2>/dev/null; then
     mysql_ready=true
     break
   fi
@@ -59,6 +67,11 @@ fi
 
 umask 077
 printf '%s' "$${DB_PASSWORD}" > /etc/bench-db-password
+
+# 비밀번호를 다루는 구간이 끝났다. 나머지는 추적을 다시 켠다 —
+# 부트스트랩 실패를 로그로 쫓으려면 xtrace가 있어야 한다.
+unset DB_PASSWORD
+set -x
 
 docker pull "${image}"
 
