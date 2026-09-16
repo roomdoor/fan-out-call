@@ -41,14 +41,21 @@ DB_PASSWORD="$(aws ssm get-parameter \
   --with-decryption \
   --query 'Parameter.Value' --output text)"
 
+# 비밀번호를 -e 로 넘기면 docker run 이 도는 동안 호스트 ps에 보이고,
+# 그 뒤로도 docker inspect mysql 에 영구히 남는다. 파일로 넘긴다.
+umask 077
+cat > /etc/bench-mysql.env <<ENVFILE
+MYSQL_ROOT_PASSWORD=$${DB_PASSWORD}
+MYSQL_DATABASE=loan_limit_gateway
+ENVFILE
+
 # MySQL은 루프백에만 바인딩한다. 이 호스트 안에서만 쓰이므로
 # 보안 그룹에 3306 인바운드 규칙도 만들지 않았다. 방어가 이중이 된다.
 docker run -d \
   --name mysql \
   --restart unless-stopped \
   -p 127.0.0.1:3306:3306 \
-  -e MYSQL_ROOT_PASSWORD="$${DB_PASSWORD}" \
-  -e MYSQL_DATABASE=loan_limit_gateway \
+  --env-file /etc/bench-mysql.env \
   mysql:8.4 \
   --character-set-server=utf8mb4 \
   --collation-server=utf8mb4_unicode_ci \
@@ -89,15 +96,22 @@ docker rm -f gateway 2>/dev/null || true
 
 # JVM 플래그는 JAVA_TOOL_OPTIONS로 넘긴다.
 #   JAVA_TOOL_OPTIONS="-Dkotlinx.coroutines.io.parallelism=192" gateway-run.sh --app...=1700
+# 비밀번호를 -e 로 넘기면 회차마다 도는 docker run 이 호스트 ps에 평문을
+# 노출하고 docker inspect gateway 에도 남는다. 파일로 넘긴다.
+umask 077
+cat > /etc/bench-gateway.env <<ENVFILE
+SPRING_DATASOURCE_URL=jdbc:mysql://127.0.0.1:3306/loan_limit_gateway?serverTimezone=Asia/Seoul&characterEncoding=UTF-8
+SPRING_DATASOURCE_USERNAME=root
+SPRING_DATASOURCE_PASSWORD=$(cat /etc/bench-db-password)
+JAVA_TOOL_OPTIONS=$${JAVA_TOOL_OPTIONS:-}
+ENVFILE
+
 docker run -d \
   --name gateway \
   --network host \
   --ulimit nofile=1048576:1048576 \
   --ulimit nproc=4194304:4194304 \
-  -e JAVA_TOOL_OPTIONS="$${JAVA_TOOL_OPTIONS:-}" \
-  -e SPRING_DATASOURCE_URL="jdbc:mysql://127.0.0.1:3306/loan_limit_gateway?serverTimezone=Asia/Seoul&characterEncoding=UTF-8" \
-  -e SPRING_DATASOURCE_USERNAME=root \
-  -e SPRING_DATASOURCE_PASSWORD="$(cat /etc/bench-db-password)" \
+  --env-file /etc/bench-gateway.env \
   __IMAGE__ \
   --app.web-client-fan-out.routing-mode=sharded \
   --app.web-client-fan-out.mock-base-url="http://__MOCK_HOST__:__BASE_PORT__" \

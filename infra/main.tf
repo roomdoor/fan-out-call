@@ -337,6 +337,13 @@ resource "aws_instance" "mock" {
     latency     = var.mock_latency
   })
 
+  # user_data는 기본적으로 인스턴스를 교체하지 않는다. 그러면 mock_latency나
+  # k6_version 을 바꿔 apply해도 부팅 스크립트가 다시 돌지 않아, 속성만
+  # 갱신되고 호스트는 옛 설정 그대로다. apply는 성공으로 보고한다.
+  # ami를 ignore_changes로 묶으면서 "이미지 교체가 우연히 재부팅해 주던"
+  # 경로도 사라졌으므로 명시적으로 켠다.
+  user_data_replace_on_change = true
+
   # ami는 변경 시 인스턴스를 교체한다. AL2023 SSM 파라미터는 AWS가 새
   # 이미지를 낼 때마다 바뀌므로, 측정 중에 mock_latency 하나 고치려고
   # apply를 돌리면 세 호스트가 통째로 재생성되고 /var/log/bench/ 와
@@ -372,6 +379,8 @@ resource "aws_instance" "gateway" {
   # 부팅 직후 SSM에서 비밀번호를 받아가므로 정책이 먼저 있어야 한다.
   depends_on = [aws_instance.mock, aws_iam_role_policy.param_read]
 
+  user_data_replace_on_change = true
+
   lifecycle {
     ignore_changes = [ami]
   }
@@ -402,7 +411,12 @@ resource "aws_instance" "k6" {
     k6_version          = var.k6_version
   })
 
-  depends_on = [aws_instance.gateway]
+  # bench.sh가 ssm:SendCommand를 쓰므로 정책이 먼저 있어야 한다. 부팅
+  # 자체는 AWS를 호출하지 않지만, apply 직후 바로 sweep을 돌리면
+  # 권한 전파 전이라 AccessDenied를 맞을 수 있다.
+  depends_on = [aws_instance.gateway, aws_iam_role_policy.bench_control]
+
+  user_data_replace_on_change = true
 
   lifecycle {
     ignore_changes = [ami]

@@ -42,7 +42,11 @@ DRAIN_POLL_SECONDS="${DRAIN_POLL_SECONDS:-15}"
 DRAIN_STABLE_CHECKS="${DRAIN_STABLE_CHECKS:-2}"
 
 # 재는 도구도 조건이다. 실제로 깔린 버전을 manifest에 남긴다.
-K6_VERSION="$(k6 version 2>/dev/null | head -1 || echo unknown)"
+# || echo 를 파이프 뒤에 붙이면 안 된다. set -o pipefail 에서 head -1 이
+# 파이프를 닫아 k6가 SIGPIPE를 받으면 파이프라인이 실패로 잡히고,
+# 이미 캡처된 줄 뒤에 "unknown" 이 덧붙는다.
+K6_VERSION="$(k6 version 2>/dev/null | head -1)"
+K6_VERSION="${K6_VERSION:-unknown}"
 JAVA_OPTS="${JAVA_OPTS:-}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
 
@@ -161,12 +165,21 @@ drain_until_quiet() {
   local cap=$(( MAX_WAIT_MS / 1000 + 30 ))
   local waited=0 stable=0 prev="" cur=""
 
+  DRAIN_CAPPED=false
+
   echo "draining in-flight transactions (max ${cap}s)..."
   while [ "${waited}" -lt "${cap}" ]; do
     sleep "${DRAIN_POLL_SECONDS}"
     waited=$(( waited + DRAIN_POLL_SECONDS ))
 
     cur="$(count_terminal_runs)" || cur=""
+    # --output text 는 빈 출력을 문자열 None으로 준다. 숫자가 아니면 버린다.
+    # 안 그러면 None이 두 번 연속 오는 것만으로 "안정됐다"고 판단해,
+    # 아직 끝나지 않은 트랜잭션을 두고 세게 된다.
+    case "${cur}" in
+      ''|*[!0-9]*) cur="" ;;
+    esac
+
     if [ -n "${cur}" ] && [ "${cur}" = "${prev}" ]; then
       stable=$(( stable + 1 ))
       if [ "${stable}" -ge "${DRAIN_STABLE_CHECKS}" ]; then
@@ -179,6 +192,9 @@ drain_until_quiet() {
     prev="${cur}"
   done
 
+  # stderr만으로는 몇 시간짜리 sweep에서 스크롤에 묻힌다.
+  # manifest에 남겨 parse.mjs가 경고할 수 있게 한다.
+  DRAIN_CAPPED=true
   echo "drain hit the ${cap}s cap; counts may miss still-running transactions" >&2
 }
 
@@ -275,10 +291,11 @@ for pool in ${POOLS}; do
         --arg image "${digest}" \
         --arg k6_version "${K6_VERSION}" \
         --arg started_at "${started_at}" \
+        --argjson drain_capped "${DRAIN_CAPPED}" \
         --argjson counts "${counts}" \
         '{config:$config, run_id:$run_id, mode:$mode, pool:$pool, rpm:$rpm, repeat:$rep,
           duration:$duration, java_opts:$java_opts, spring_args:$spring_args,
-          gateway_image:$image, k6_version:$k6_version,
+          gateway_image:$image, k6_version:$k6_version, drain_capped:$drain_capped,
           started_at:$started_at, gateway_counts:$counts}' \
         > "${out_dir}/rep${rep}.manifest.json"
 
