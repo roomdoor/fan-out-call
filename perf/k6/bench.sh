@@ -6,9 +6,8 @@
 #
 #   ./bench.sh config/v15-baseline.env
 #
-# 회차마다 manifest.json을 남긴다. 어떤 이미지 다이제스트로, 어떤 인자로,
-# 어떤 mock 프로파일에서 잰 숫자인지가 결과 옆에 붙어 있어야
-# v6이나 v13 같은 사고(조건을 모른 채 측정)가 반복되지 않는다.
+# 회차마다 manifest.json에 측정 조건을 남긴다. 조건을 모른 채 측정해서
+# 결과를 통째로 버린 일이 v6, v13에서 있었다.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -41,10 +40,8 @@ POLL_MAX_MS="${POLL_MAX_MS:-5000}"
 DRAIN_POLL_SECONDS="${DRAIN_POLL_SECONDS:-15}"
 DRAIN_STABLE_CHECKS="${DRAIN_STABLE_CHECKS:-2}"
 
-# 재는 도구도 조건이다. 실제로 깔린 버전을 manifest에 남긴다.
-# || echo 를 파이프 뒤에 붙이면 안 된다. set -o pipefail 에서 head -1 이
-# 파이프를 닫아 k6가 SIGPIPE를 받으면 파이프라인이 실패로 잡히고,
-# 이미 캡처된 줄 뒤에 "unknown" 이 덧붙는다.
+# 재는 도구도 조건이다. || echo 를 파이프 뒤에 붙이면 pipefail 때문에
+# SIGPIPE가 실패로 잡혀 캡처된 줄 뒤에 unknown 이 덧붙는다.
 K6_VERSION="$(k6 version 2>/dev/null | head -1)"
 K6_VERSION="${K6_VERSION:-unknown}"
 JAVA_OPTS="${JAVA_OPTS:-}"
@@ -154,13 +151,9 @@ count_terminal_runs() {
     | tr -d '\r\n '
 }
 
-# 고정 sleep은 둘 다 나쁘다. 짧으면 아직 안 끝난 트랜잭션이 COMPLETED에서
-# 빠져 처리율이 낮게 나오는데, 그 누락이 부하가 높을수록 커져서 천장이
-# 실제보다 아래로 보인다. 길게 잡으면(MAX_WAIT_MS=180s 기준 3분) 회차마다
-# 죽는 시간이 쌓여 48회차 sweep에 두 시간 넘게 추가된다.
-#
-# 종료 로그 수가 더 늘지 않을 때까지 기다린다. 한가하면 금방 끝나고
-# 밀려 있으면 그만큼 기다린다. 상한은 폴링 타임아웃에 맞춘다.
+# 고정 sleep은 짧으면 안 끝난 트랜잭션이 누락되어(부하가 높을수록 심해져
+# 천장이 낮게 보인다) 길면 회차마다 죽는 시간이 쌓인다.
+# 종료 로그가 더 안 늘 때까지 기다리고 상한만 폴링 타임아웃에 맞춘다.
 drain_until_quiet() {
   local cap=$(( MAX_WAIT_MS / 1000 + 30 ))
   local waited=0 stable=0 prev="" cur=""
@@ -173,9 +166,8 @@ drain_until_quiet() {
     waited=$(( waited + DRAIN_POLL_SECONDS ))
 
     cur="$(count_terminal_runs)" || cur=""
-    # --output text 는 빈 출력을 문자열 None으로 준다. 숫자가 아니면 버린다.
-    # 안 그러면 None이 두 번 연속 오는 것만으로 "안정됐다"고 판단해,
-    # 아직 끝나지 않은 트랜잭션을 두고 세게 된다.
+    # --output text 는 빈 출력을 None으로 준다. 숫자가 아니면 버린다 —
+    # 안 그러면 None 두 번으로 "안정됐다"고 잘못 판단한다.
     case "${cur}" in
       ''|*[!0-9]*) cur="" ;;
     esac

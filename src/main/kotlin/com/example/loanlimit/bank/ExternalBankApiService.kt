@@ -67,13 +67,8 @@ class ExternalBankApiService(
         requestedAt: LocalDateTime,
         respondedAt: LocalDateTime,
     ): BankCallResult {
-        // mockBaseUrl 은 resolveMockBaseUrl 을 부르는 lazy 라서 던질 수 있다.
-        // 샤드 라우팅에서 은행 코드가 BANK-\d{2} 형식을 벗어나거나
-        // shard-count/mock-base-url 이 잘못되면 require 가 터진다.
-        //
-        // 이 함수는 실패를 한 은행에 가두려고 부르는 자리다. 여기서 던지면
-        // 격리가 깨져 호출부의 catch/onErrorResume 밖으로 나가고, 모드마다
-        // 형제 은행이 취소되거나 루프가 멈춘다.
+        // mockBaseUrl 은 던질 수 있는 lazy 다(샤드 주소 파싱). 실패를 가두는
+        // 자리에서 던지면 격리가 깨져 형제 은행까지 죽는다.
         val resolvedHost = runCatching { mockBaseUrl }.getOrDefault("unresolved")
 
         return BankCallResult(
