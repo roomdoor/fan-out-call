@@ -58,12 +58,16 @@ class SequentialSingleThreadBankFanOutExecutor(
         bankCode: String,
         request: LoanLimitQueryRequest,
     ): BankCallResult {
-        val bankService = bankApiServiceRegistry.get(bankCode)
         val requestedAt = LocalDateTime.now()
         val started = Instant.now()
-        val requestPayload = bankService.buildRequest(request)
+        // registry.get() 과 buildRequest() 도 try 안에 둔다. 밖에 두면 은행 하나의
+        // 문제로 for 루프가 중단되어 남은 은행을 호출조차 하지 않는다.
+        var requestPayload = "{}"
 
         return try {
+            val bankService = bankApiServiceRegistry.get(bankCode)
+            requestPayload = bankService.buildRequest(request)
+
             val response = withTimeout(appProperties.banks.perCallTimeoutMs) {
                 bankService.callApi(request, requestPayload)
             }

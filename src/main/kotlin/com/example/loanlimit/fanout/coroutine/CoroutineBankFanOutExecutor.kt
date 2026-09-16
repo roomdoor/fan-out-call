@@ -60,11 +60,16 @@ class CoroutineBankFanOutExecutor(
         bankCode: String,
         request: LoanLimitQueryRequest,
     ): BankCallResult {
-        val bankService = bankApiServiceRegistry.get(bankCode)
         val requestedAt = LocalDateTime.now()
         val started = Instant.now()
-        val requestPayload = bankService.buildRequest(request)
+        // registry.get() 과 buildRequest() 도 try 안에 둔다. 밖에 두면 알 수 없는
+        // 은행 코드나 직렬화 오류가 coroutineScope로 올라가 형제 은행이 전부
+        // 취소된다. 은행 하나의 문제는 그 은행에만 가둔다.
+        var requestPayload = "{}"
         return try {
+            val bankService = bankApiServiceRegistry.get(bankCode)
+            requestPayload = bankService.buildRequest(request)
+
             val response = withTimeout(appProperties.banks.perCallTimeoutMs) {
                 bankService.callApiNonBlocking(request, requestPayload)
             }

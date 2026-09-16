@@ -88,9 +88,19 @@ pool 512/1024 회차가 `io.parallelism` 기본값 차이로 교란됐던 것이
 앞의 세 `status=` 행이 서로 배타적이고 합이 run 수와 같다. `Run marked as FAILED`는
 그 앞 단계에서 터진 경우라 별도로 센다.
 
-**거부와 저장 실패는 은행 단위로 집계한다.** 실패가 한 은행에 갇히도록
-고쳐서(`LoanLimitQueryOrchestrator`, `AsyncThreadPoolBankFanOutExecutor`)
-은행 하나가 막혀도 나머지는 계속 호출되고 기록된다.
+**거부와 저장 실패는 은행 단위로 집계한다.** 은행 하나가 막혀도 나머지는 계속
+호출되고 기록된다. 실패 종류에 따라 막는 자리가 다르다.
+
+- 저장 실패 — `LoanLimitQueryOrchestrator` 가 `onEachResult` 를 감싼다. 정의되는
+  곳이 한 곳뿐이라 네 모드가 자동으로 같은 정책을 쓴다
+- 제출 실패(알 수 없는 은행 코드, 직렬화 오류) — 모드마다 구조가 달라 각
+  executor가 맡는다. coroutine·sequential은 `try` 범위, webclient는 `Mono.defer`,
+  async-threadpool은 `RejectedExecutionException` 분류
+- 풀 거부 — async-threadpool에만 해당. `REJECTED` 로 기록
+
+측정 부작용 하나. 거부된 은행도 결과 행을 남기므로, 예전에 첫 거부에서 run이
+중단되던 때보다 **포화 지점에서 DB 쓰기가 늘어난다.** 천장 근처에서 DB로 부하가
+옮겨가 관측되는 천장 자체가 움직일 수 있다.
 
 그래서 **v1~v14의 FAILED 수치와 직접 비교할 수 없다.** 그때는 은행 하나만
 거부돼도 run 전체가 FAILED였고 보고서들이 그것을 "fail-fast"로 해석했다.

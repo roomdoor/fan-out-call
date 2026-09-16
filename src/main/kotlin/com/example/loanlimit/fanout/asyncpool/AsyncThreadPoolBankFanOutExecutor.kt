@@ -47,6 +47,7 @@ class AsyncThreadPoolBankFanOutExecutor(
         //
         // 저장 실패 격리는 LoanLimitQueryOrchestrator가 onEachResult를 감싸서
         // 처리한다. 네 모드가 같은 정책을 쓰도록 한 곳에 뒀다.
+        // 제출 실패 격리는 모드마다 구조가 달라 각 executor가 맡는다.
         coroutineScope {
             banks.map { bank ->
                 async(Dispatchers.IO) {
