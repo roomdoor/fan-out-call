@@ -20,7 +20,17 @@ enabled=1
 gpgcheck=1
 gpgkey=https://dl.k6.io/key.gpg
 REPO
-dnf install -y k6
+# 버전을 고정한다. 조건 추적이 이 저장소의 설계 전제인데 정작 재는 도구가
+# 미추적 변수로 남으면 안 된다. bench.sh가 manifest에도 기록한다.
+#
+# 저장소에서 그 버전이 빠졌거나 NEVR 형식이 달라 못 찾으면 set -e 로
+# 여기서 중단되는데, 그러면 준비 마커도 안 생기고 apply는 성공으로 보인다.
+# 실패 시 어떤 버전이 있는지 로그에 남겨 원인을 바로 알 수 있게 한다.
+if ! dnf install -y "k6-${k6_version}"; then
+  echo "k6-${k6_version} 설치 실패. 사용 가능한 버전:" >&2
+  dnf list --showduplicates k6 >&2 || true
+  exit 1
+fi
 
 cat > /etc/sysctl.d/99-bench.conf <<'SYSCTL'
 # VU 하나가 커넥션을 붙잡는다.

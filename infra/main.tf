@@ -228,11 +228,29 @@ resource "aws_iam_instance_profile" "instance" {
   role = aws_iam_role.instance.name
 }
 
+# k6 전용 역할. bench_control(게이트웨이에 RunShellScript 실행)을 세 대가
+# 공유하는 역할에 붙이면, mock 호스트와 게이트웨이 자신의 --network host
+# 컨테이너에서도 측정 대상에 root 명령을 쏠 수 있다. 명령을 보내는 쪽은
+# C 하나뿐이므로 거기만 준다.
+resource "aws_iam_role" "k6" {
+  name               = "${var.name_prefix}-k6"
+  assume_role_policy = data.aws_iam_policy_document.ec2_assume.json
+}
+
+resource "aws_iam_role_policy_attachment" "k6_ssm" {
+  role       = aws_iam_role.k6.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+resource "aws_iam_instance_profile" "k6" {
+  name = "${var.name_prefix}-k6"
+  role = aws_iam_role.k6.name
+}
+
 # bench.sh는 C(k6)에서 돌면서 A(게이트웨이)를 SSM으로 제어한다.
 # 회차마다 게이트웨이를 재기동하고 로그 카운트를 받아오기 위한 권한이다.
 # 대상은 이 스택의 인스턴스와 RunShellScript 문서로 한정한다.
 data "aws_region" "current" {}
-data "aws_caller_identity" "current" {}
 
 data "aws_iam_policy_document" "bench_control" {
   statement {
@@ -260,10 +278,24 @@ data "aws_iam_policy_document" "param_read" {
     resources = [aws_ssm_parameter.db_password.arn]
   }
 
-  # SecureString 복호화. 계정 기본 SSM 키로만 제한한다.
+  # SecureString 복호화.
+  #
+  # Resource에 alias ARN을 쓰면 안 된다. IAM은 kms:Decrypt를 키 ARN
+  # (...:key/mrk-...)으로 평가하므로 alias는 절대 매칭되지 않고, 부팅 때
+  # get-parameter --with-decryption 이 AccessDenied로 막혀 user-data가
+  # set -e 로 중단된다. apply는 성공한 것처럼 보이고 A 호스트만 죽는다.
+  #
+  # 키 ARN을 조회해 박는 대신 ViaService 조건으로 좁힌다. SSM을 통한
+  # 복호화만 허용되므로 이 역할로 다른 경로의 복호화는 할 수 없다.
   statement {
     actions   = ["kms:Decrypt"]
-    resources = ["arn:aws:kms:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:alias/aws/ssm"]
+    resources = ["*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "kms:ViaService"
+      values   = ["ssm.${data.aws_region.current.name}.amazonaws.com"]
+    }
   }
 }
 
@@ -275,7 +307,7 @@ resource "aws_iam_role_policy" "param_read" {
 
 resource "aws_iam_role_policy" "bench_control" {
   name   = "${var.name_prefix}-bench-control"
-  role   = aws_iam_role.instance.id
+  role   = aws_iam_role.k6.id
   policy = data.aws_iam_policy_document.bench_control.json
 }
 
@@ -305,6 +337,21 @@ resource "aws_instance" "mock" {
     latency     = var.mock_latency
   })
 
+  # user_data는 기본적으로 인스턴스를 교체하지 않는다. 그러면 mock_latency나
+  # k6_version 을 바꿔 apply해도 부팅 스크립트가 다시 돌지 않아, 속성만
+  # 갱신되고 호스트는 옛 설정 그대로다. apply는 성공으로 보고한다.
+  # ami를 ignore_changes로 묶으면서 "이미지 교체가 우연히 재부팅해 주던"
+  # 경로도 사라졌으므로 명시적으로 켠다.
+  user_data_replace_on_change = true
+
+  # ami는 변경 시 인스턴스를 교체한다. AL2023 SSM 파라미터는 AWS가 새
+  # 이미지를 낼 때마다 바뀌므로, 측정 중에 mock_latency 하나 고치려고
+  # apply를 돌리면 세 호스트가 통째로 재생성되고 /var/log/bench/ 와
+  # 진행 중인 회차가 사라진다. 이미지를 바꾸려면 destroy 후 다시 만든다.
+  lifecycle {
+    ignore_changes = [ami]
+  }
+
   tags = { Name = "${var.name_prefix}-mock" }
 }
 
@@ -332,6 +379,12 @@ resource "aws_instance" "gateway" {
   # 부팅 직후 SSM에서 비밀번호를 받아가므로 정책이 먼저 있어야 한다.
   depends_on = [aws_instance.mock, aws_iam_role_policy.param_read]
 
+  user_data_replace_on_change = true
+
+  lifecycle {
+    ignore_changes = [ami]
+  }
+
   tags = { Name = "${var.name_prefix}-gateway" }
 }
 
@@ -340,7 +393,7 @@ resource "aws_instance" "k6" {
   instance_type          = var.k6_instance_type
   subnet_id              = aws_subnet.public.id
   vpc_security_group_ids = [aws_security_group.k6.id]
-  iam_instance_profile   = aws_iam_instance_profile.instance.name
+  iam_instance_profile   = aws_iam_instance_profile.k6.name
 
   root_block_device {
     volume_size = var.root_volume_gb
@@ -355,9 +408,19 @@ resource "aws_instance" "k6" {
     shard_count         = var.mock_shard_count
     region              = var.region
     repo_ref            = var.repo_ref
+    k6_version          = var.k6_version
   })
 
-  depends_on = [aws_instance.gateway]
+  # bench.sh가 ssm:SendCommand를 쓰므로 정책이 먼저 있어야 한다. 부팅
+  # 자체는 AWS를 호출하지 않지만, apply 직후 바로 sweep을 돌리면
+  # 권한 전파 전이라 AccessDenied를 맞을 수 있다.
+  depends_on = [aws_instance.gateway, aws_iam_role_policy.bench_control]
+
+  user_data_replace_on_change = true
+
+  lifecycle {
+    ignore_changes = [ami]
+  }
 
   tags = { Name = "${var.name_prefix}-k6" }
 }

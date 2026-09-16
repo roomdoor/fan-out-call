@@ -37,8 +37,16 @@ REPEATS="${REPEATS:-1}"
 DURATION="${DURATION:-2m}"
 MAX_WAIT_MS="${MAX_WAIT_MS:-120000}"
 POLL_MAX_MS="${POLL_MAX_MS:-5000}"
-# 이론 하한이 31초다. 로그 카운트 전에 남은 트랜잭션이 끝날 시간을 준다.
-DRAIN_SECONDS="${DRAIN_SECONDS:-45}"
+# 드레인은 고정 시간이 아니라 완료가 멈출 때까지 기다린다.
+DRAIN_POLL_SECONDS="${DRAIN_POLL_SECONDS:-15}"
+DRAIN_STABLE_CHECKS="${DRAIN_STABLE_CHECKS:-2}"
+
+# 재는 도구도 조건이다. 실제로 깔린 버전을 manifest에 남긴다.
+# || echo 를 파이프 뒤에 붙이면 안 된다. set -o pipefail 에서 head -1 이
+# 파이프를 닫아 k6가 SIGPIPE를 받으면 파이프라인이 실패로 잡히고,
+# 이미 캡처된 줄 뒤에 "unknown" 이 덧붙는다.
+K6_VERSION="$(k6 version 2>/dev/null | head -1)"
+K6_VERSION="${K6_VERSION:-unknown}"
 JAVA_OPTS="${JAVA_OPTS:-}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
 
@@ -139,6 +147,57 @@ SCRIPT
 )"
 }
 
+# 종료 상태를 남긴 run 수만 센다. 드레인 판정용이라 가볍게 유지한다.
+count_terminal_runs() {
+  ssm_run "${GATEWAY_INSTANCE_ID}" \
+    "docker logs gateway 2>&1 | grep -c 'Background fan-out completed' || true" \
+    | tr -d '\r\n '
+}
+
+# 고정 sleep은 둘 다 나쁘다. 짧으면 아직 안 끝난 트랜잭션이 COMPLETED에서
+# 빠져 처리율이 낮게 나오는데, 그 누락이 부하가 높을수록 커져서 천장이
+# 실제보다 아래로 보인다. 길게 잡으면(MAX_WAIT_MS=180s 기준 3분) 회차마다
+# 죽는 시간이 쌓여 48회차 sweep에 두 시간 넘게 추가된다.
+#
+# 종료 로그 수가 더 늘지 않을 때까지 기다린다. 한가하면 금방 끝나고
+# 밀려 있으면 그만큼 기다린다. 상한은 폴링 타임아웃에 맞춘다.
+drain_until_quiet() {
+  local cap=$(( MAX_WAIT_MS / 1000 + 30 ))
+  local waited=0 stable=0 prev="" cur=""
+
+  DRAIN_CAPPED=false
+
+  echo "draining in-flight transactions (max ${cap}s)..."
+  while [ "${waited}" -lt "${cap}" ]; do
+    sleep "${DRAIN_POLL_SECONDS}"
+    waited=$(( waited + DRAIN_POLL_SECONDS ))
+
+    cur="$(count_terminal_runs)" || cur=""
+    # --output text 는 빈 출력을 문자열 None으로 준다. 숫자가 아니면 버린다.
+    # 안 그러면 None이 두 번 연속 오는 것만으로 "안정됐다"고 판단해,
+    # 아직 끝나지 않은 트랜잭션을 두고 세게 된다.
+    case "${cur}" in
+      ''|*[!0-9]*) cur="" ;;
+    esac
+
+    if [ -n "${cur}" ] && [ "${cur}" = "${prev}" ]; then
+      stable=$(( stable + 1 ))
+      if [ "${stable}" -ge "${DRAIN_STABLE_CHECKS}" ]; then
+        echo "drained after ${waited}s (terminal runs: ${cur})"
+        return 0
+      fi
+    else
+      stable=0
+    fi
+    prev="${cur}"
+  done
+
+  # stderr만으로는 몇 시간짜리 sweep에서 스크롤에 묻힌다.
+  # manifest에 남겨 parse.mjs가 경고할 수 있게 한다.
+  DRAIN_CAPPED=true
+  echo "drain hit the ${cap}s cap; counts may miss still-running transactions" >&2
+}
+
 # ---------------------------------------------------------------------------
 # 측정 루프
 # ---------------------------------------------------------------------------
@@ -200,10 +259,8 @@ for pool in ${POOLS}; do
         echo "k6 exited non-zero for ${run_id} (continuing)" >&2
 
       # k6는 DURATION + gracefulStop에서 멈추지만 트랜잭션 e2e가 최소 31초다.
-      # 막바지에 submit된 건들은 아직 COMPLETED 로그를 남기지 않았다.
-      # 바로 세면 처리율이 체계적으로 낮게 나온다.
-      echo "draining in-flight transactions (${DRAIN_SECONDS}s)..."
-      sleep "${DRAIN_SECONDS}"
+      # 막바지에 submit된 건들은 아직 종료 로그를 남기지 않았다.
+      drain_until_quiet
 
       # SSM 일시 장애로 sweep 전체를 잃지 않는다. k6 실패를 넘기는 것과 같은 기준.
       counts="$(collect_counts "${run_id}")" || counts=""
@@ -211,7 +268,9 @@ for pool in ${POOLS}; do
       case "${counts}" in
         ''|None|null) counts="null" ;;
       esac
-      if ! echo "${counts}" | jq -e . >/dev/null 2>&1; then
+      # 이미 null로 정규화된 경우는 검사하지 않는다. jq -e 는 null을 실패로
+      # 취급해서, 진짜 원인 위에 가짜 파서 오류가 덧씌워진다.
+      if [ "${counts}" != "null" ] && ! echo "${counts}" | jq -e . >/dev/null 2>&1; then
         echo "count collection returned unusable output for ${run_id}" >&2
         counts="null"
       fi
@@ -230,11 +289,14 @@ for pool in ${POOLS}; do
         --arg java_opts "${JAVA_OPTS}" \
         --arg spring_args "${pool_args} ${EXTRA_ARGS}" \
         --arg image "${digest}" \
+        --arg k6_version "${K6_VERSION}" \
         --arg started_at "${started_at}" \
+        --argjson drain_capped "${DRAIN_CAPPED}" \
         --argjson counts "${counts}" \
         '{config:$config, run_id:$run_id, mode:$mode, pool:$pool, rpm:$rpm, repeat:$rep,
           duration:$duration, java_opts:$java_opts, spring_args:$spring_args,
-          gateway_image:$image, started_at:$started_at, gateway_counts:$counts}' \
+          gateway_image:$image, k6_version:$k6_version, drain_capped:$drain_capped,
+          started_at:$started_at, gateway_counts:$counts}' \
         > "${out_dir}/rep${rep}.manifest.json"
 
       echo "counts: ${counts}"

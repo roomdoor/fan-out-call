@@ -8,7 +8,11 @@ export const RUN_ID = __ENV.RUN_ID || `k6-run-${Date.now()}`;
 const modeEndpoints = {
   coroutine: '/api/v1/loan-limit/coroutine/queries',
   'async-threadpool': '/api/v1/loan-limit/async-threadpool/queries',
-  webclient: '/api/v1/loan-limit/webclient/queries'
+  webclient: '/api/v1/loan-limit/webclient/queries',
+  // bad-case 대조군. 컨트롤러가 실제로 있으므로 여기서 막지 않는다.
+  // 빠져 있으면 MODE=sequential 설정이 매 회차 setup()에서 터지는데,
+  // bench.sh가 k6의 비정상 종료를 넘기므로 sweep 전체가 summary 0건으로 끝난다.
+  sequential: '/api/v1/loan-limit/sequential/queries'
 };
 
 export function getSubmitEndpoint(mode) {

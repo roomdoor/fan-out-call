@@ -18,12 +18,22 @@ fs.file-max = 2097152
 vm.max_map_count = 1048576
 
 # 은행 50곳으로 나가는 동시 커넥션이 9 x RPM 규모다.
-net.ipv4.ip_local_port_range = 1024 65535
+# 하한을 1024로 내리면 게이트웨이가 듣는 8080이 임시 포트 범위에 들어간다.
+# sweep은 회차마다 게이트웨이를 재기동하는데, 그 사이 아웃바운드 커넥션이
+# 8080을 선점하면 기동이 Address already in use로 실패하고 회차가 날아간다.
+net.ipv4.ip_local_port_range = 10240 65535
 net.core.somaxconn = 65535
 net.ipv4.tcp_max_syn_backlog = 65535
 net.ipv4.tcp_tw_reuse = 1
 SYSCTL
 sysctl --system
+
+# 여기부터 비밀번호를 다룬다. set -x 가 켜져 있으면 bash xtrace가
+# "+ DB_PASSWORD=<평문>" 을 찍고, exec > >(tee ...) 때문에
+# /var/log/bench-bootstrap.log(0644)와 /var/log/cloud-init-output.log에
+# 남는다. ssm-user도 컨테이너도 읽을 수 있어, 비밀번호를 user-data에서
+# 빼내려고 SecureString을 도입한 의미가 사라진다.
+set +x
 
 DB_PASSWORD="$(aws ssm get-parameter \
   --region '${region}' \
@@ -31,14 +41,21 @@ DB_PASSWORD="$(aws ssm get-parameter \
   --with-decryption \
   --query 'Parameter.Value' --output text)"
 
+# 비밀번호를 -e 로 넘기면 docker run 이 도는 동안 호스트 ps에 보이고,
+# 그 뒤로도 docker inspect mysql 에 영구히 남는다. 파일로 넘긴다.
+umask 077
+cat > /etc/bench-mysql.env <<ENVFILE
+MYSQL_ROOT_PASSWORD=$${DB_PASSWORD}
+MYSQL_DATABASE=loan_limit_gateway
+ENVFILE
+
 # MySQL은 루프백에만 바인딩한다. 이 호스트 안에서만 쓰이므로
 # 보안 그룹에 3306 인바운드 규칙도 만들지 않았다. 방어가 이중이 된다.
 docker run -d \
   --name mysql \
   --restart unless-stopped \
   -p 127.0.0.1:3306:3306 \
-  -e MYSQL_ROOT_PASSWORD="$${DB_PASSWORD}" \
-  -e MYSQL_DATABASE=loan_limit_gateway \
+  --env-file /etc/bench-mysql.env \
   mysql:8.4 \
   --character-set-server=utf8mb4 \
   --collation-server=utf8mb4_unicode_ci \
@@ -46,7 +63,8 @@ docker run -d \
 
 mysql_ready=false
 for _ in $(seq 1 90); do
-  if docker exec mysql mysqladmin ping -uroot -p"$${DB_PASSWORD}" --silent 2>/dev/null; then
+  # -p로 넘기면 호스트 프로세스 목록(ps)에 평문이 보인다. MYSQL_PWD로 준다.
+  if docker exec -e MYSQL_PWD="$${DB_PASSWORD}" mysql mysqladmin ping -uroot --silent 2>/dev/null; then
     mysql_ready=true
     break
   fi
@@ -59,6 +77,11 @@ fi
 
 umask 077
 printf '%s' "$${DB_PASSWORD}" > /etc/bench-db-password
+
+# 비밀번호를 다루는 구간이 끝났다. 나머지는 추적을 다시 켠다 —
+# 부트스트랩 실패를 로그로 쫓으려면 xtrace가 있어야 한다.
+unset DB_PASSWORD
+set -x
 
 docker pull "${image}"
 
@@ -73,15 +96,22 @@ docker rm -f gateway 2>/dev/null || true
 
 # JVM 플래그는 JAVA_TOOL_OPTIONS로 넘긴다.
 #   JAVA_TOOL_OPTIONS="-Dkotlinx.coroutines.io.parallelism=192" gateway-run.sh --app...=1700
+# 비밀번호를 -e 로 넘기면 회차마다 도는 docker run 이 호스트 ps에 평문을
+# 노출하고 docker inspect gateway 에도 남는다. 파일로 넘긴다.
+umask 077
+cat > /etc/bench-gateway.env <<ENVFILE
+SPRING_DATASOURCE_URL=jdbc:mysql://127.0.0.1:3306/loan_limit_gateway?serverTimezone=Asia/Seoul&characterEncoding=UTF-8
+SPRING_DATASOURCE_USERNAME=root
+SPRING_DATASOURCE_PASSWORD=$(cat /etc/bench-db-password)
+JAVA_TOOL_OPTIONS=$${JAVA_TOOL_OPTIONS:-}
+ENVFILE
+
 docker run -d \
   --name gateway \
   --network host \
   --ulimit nofile=1048576:1048576 \
   --ulimit nproc=4194304:4194304 \
-  -e JAVA_TOOL_OPTIONS="$${JAVA_TOOL_OPTIONS:-}" \
-  -e SPRING_DATASOURCE_URL="jdbc:mysql://127.0.0.1:3306/loan_limit_gateway?serverTimezone=Asia/Seoul&characterEncoding=UTF-8" \
-  -e SPRING_DATASOURCE_USERNAME=root \
-  -e SPRING_DATASOURCE_PASSWORD="$(cat /etc/bench-db-password)" \
+  --env-file /etc/bench-gateway.env \
   __IMAGE__ \
   --app.web-client-fan-out.routing-mode=sharded \
   --app.web-client-fan-out.mock-base-url="http://__MOCK_HOST__:__BASE_PORT__" \

@@ -76,6 +76,16 @@ variable "mock_latency" {
   }
 }
 
+variable "k6_version" {
+  description = <<-EOT
+    C 호스트에 설치할 k6 버전. 세대 간 고정해야 비교가 성립한다.
+    `--summary-export` 는 v0.30부터 deprecated이므로 올릴 때 bench.sh가
+    여전히 summary JSON을 받는지 확인할 것 — 조용히 빈 표가 된다.
+  EOT
+  type        = string
+  default     = "1.5.0"
+}
+
 variable "repo_ref" {
   description = "C 호스트가 클론할 게이트웨이 저장소의 브랜치/태그. bench.sh와 시나리오가 여기서 온다."
   type        = string
