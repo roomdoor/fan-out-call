@@ -72,8 +72,20 @@ pool 512/1024 회차가 `io.parallelism` 기본값 차이로 교란됐던 것이
 | 로그 패턴 | 의미 |
 | --- | --- |
 | `Background fan-out completed ... status=COMPLETED` | 50/50 전부 성공 |
-| `Background fan-out completed ... status=PARTIAL` | 일부 은행만 응답 |
-| `Run marked as FAILED ... did not accept task` | 풀 거부 |
+| `Background fan-out completed ... status=PARTIAL_FAILURE` | 일부 은행만 성공 |
+| `Bank call submission rejected bankCode=` | 풀이 그 은행 호출을 거부 |
+| `Result persistence failed bankCode=` | 그 은행 결과를 DB에 저장 실패 |
+| `Run marked as FAILED` | run 수준 실패 (fan-out 자체가 끝나지 못함) |
+
+**거부와 저장 실패는 은행 단위로 집계한다.** 실패가 한 은행에 갇히도록
+고쳐서(`LoanLimitQueryOrchestrator`, `AsyncThreadPoolBankFanOutExecutor`)
+은행 하나가 막혀도 나머지는 계속 호출되고 기록된다.
+
+그래서 **v1~v14의 FAILED 수치와 직접 비교할 수 없다.** 그때는 은행 하나만
+거부돼도 run 전체가 FAILED였고 보고서들이 그것을 "fail-fast"로 해석했다.
+지금은 통과한 은행이 있으면 `PARTIAL_FAILURE` 가 되고, 막힌 은행 수가
+`REJECTED` 행으로 남는다. 몇 개가 막혔는지 알 수 있어 더 정확하지만
+기준이 달라졌다. v15가 새 기준선인 이유 중 하나다.
 
 SSM stdout이 24,000자에서 잘리므로 로그 원본은 가져오지 않는다. A에서
 세고 숫자만 받는다. 원본은 A의 `/var/log/bench/` 에 남는다.
