@@ -103,7 +103,7 @@ class LoanLimitQueryOrchestrator(
             //
             // 실패한 은행은 행이 없는데 finalizeRunStatus는 저장된 행만 세므로
             // run은 COMPLETED로 남는다(부분 성공을 구분하지 않기로 한 결정).
-            // 그래서 아래 집계 로그가 유일한 신호다.
+            // 그래서 아래 집계 로그와 그걸 읽는 parse.mjs 경고로만 드러난다.
             val persistFailures = AtomicInteger()
 
             fanOutExecutor.execute(

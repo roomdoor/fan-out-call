@@ -45,6 +45,8 @@ class AsyncThreadPoolBankFanOutExecutor(
                     val result = try {
                         asyncBankCallWorker.call(runId, bank, request).await()
                     } catch (e: CancellationException) {
+                        // 아래 catch들이 취소를 삼키지 않게 막는다. 지우면
+                        // 진행 중이던 호출이 REJECTED 행으로 기록된다.
                         throw e
                     } catch (e: RejectedExecutionException) {
                         // 풀 거부는 @Async 프록시가 동기적으로 던진다.
