@@ -4,6 +4,7 @@ import com.example.loanlimit.config.AppProperties
 import com.example.loanlimit.fanout.BankFanOutExecutor
 import com.example.loanlimit.loanlimitbatchrun.dto.request.LoanLimitQueryRequest
 import com.example.loanlimit.bankcallresult.entity.BankCallResult
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -11,6 +12,8 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.future.await
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Component
+import java.time.LocalDateTime
+import java.util.concurrent.RejectedExecutionException
 
 @Component
 class AsyncThreadPoolBankFanOutExecutor(
@@ -41,29 +44,78 @@ class AsyncThreadPoolBankFanOutExecutor(
         // join()이 영원히 반환되지 않는 교착이 발생했다. 64 / 31s 는 약 124 RPM 이다.
         //
         // await()는 서스펜드라 대기 중에 워커를 반납한다.
-        // 저장 실패를 은행 단위로 가둔다. 그냥 던지면 coroutineScope가 형제
-        // 코루틴을 취소해서, 이미 받아온 나머지 49건이 저장되지 못하고 버려진다.
-        // 옛 allOf().join() 은 각 thenAccept가 독립이라 전부 저장한 뒤에 던졌다.
-        // 그 동작을 유지한다 — 전부 시도하고, 실패가 있었으면 그때 알린다.
         //
-        // 취소가 위험한 이유가 하나 더 있다. @Async 퓨처는 supplyAsync 기반이라
-        // cancel(false)로 워커를 끊지 못한다. 취소된 형제들의 풀 스레드는
-        // per-call-timeout-ms(50초) 동안 버려질 결과를 계속 기다린다.
-        val failures = coroutineScope {
+        // 저장 실패 격리는 LoanLimitQueryOrchestrator가 onEachResult를 감싸서
+        // 처리한다. 네 모드가 같은 정책을 쓰도록 한 곳에 뒀다.
+        // 제출 실패 격리는 모드마다 구조가 달라 각 executor가 맡는다.
+        coroutineScope {
             banks.map { bank ->
                 async(Dispatchers.IO) {
-                    val result = asyncBankCallWorker.call(runId, bank, request).await()
-                    runCatching { onEachResult(result) }
+                    // 풀이 거부하면(queue 가득 + maxPool 도달) @Async 프록시가
+                    // 퓨처를 만들기 전에 동기적으로 던진다. 그대로 두면 형제 은행이
+                    // 전부 취소되고 이미 받아온 결과까지 버려진다. 은행 하나가
+                    // 거부된 것이므로 그 은행의 실패로 기록한다.
+                    //
+                    // 동기적으로 오는 것은 RejectedExecutionException 뿐이다.
+                    // 워커 본문(registry.get, buildRequest)의 실패는 @Async라
+                    // 퓨처가 예외적으로 완료되는 형태로 온다.
+                    val result = try {
+                        asyncBankCallWorker.call(runId, bank, request).await()
+                    } catch (e: CancellationException) {
+                        // 취소는 실패가 아니다. 삼키면 진행 중인 호출이
+                        // REJECTED 행으로 기록되고 취소가 전파되지 않는다.
+                        throw e
+                    } catch (e: RejectedExecutionException) {
+                        log.warn("Bank call submission rejected bankCode=$bank message=${e.message}")
+                        failureResult(runId, bank, "REJECTED", "Executor rejected bank call", e)
+                    } catch (e: Exception) {
+                        // 거부가 아닌 제출 단계 실패(알 수 없는 은행 코드, 요청 직렬화 등).
+                        // 독립성은 유지하되 REJECTED와 섞지 않는다 — 섞으면
+                        // 거부 카운트가 설정 오류까지 세게 된다.
+                        //
+                        // EXCEPTION은 AsyncBankCallWorker가 평범한 타임아웃·HTTP
+                        // 오류에 이미 쓰는 코드라 DB에서 구분이 안 된다. 별도 코드를 쓴다.
+                        log.warn("Bank call submission failed bankCode=$bank errorType=${e::class.simpleName} message=${e.message}")
+                        failureResult(runId, bank, "SUBMIT_ERROR", "Bank call submission failed", e)
+                    }
+                    onEachResult(result)
                 }
             }.awaitAll()
-        }.mapNotNull { it.exceptionOrNull() }
-
-        failures.firstOrNull()?.let { first ->
-            log.error("Result persistence failed for ${failures.size}/${banks.size} banks", first)
-            throw first
         }
 
         log.info("Async-threadpool fan-out finished bankCount=${banks.size}")
+    }
+
+    // 제출 단계에서 끝난 은행. 호출을 보내기 전이라 payload는 비어 있다.
+    private fun failureResult(
+        runId: Long,
+        bankCode: String,
+        responseCode: String,
+        responseMessage: String,
+        e: Exception,
+    ): BankCallResult {
+        val now = LocalDateTime.now()
+        // 이 함수가 던지면 격리가 깨져 형제 코루틴이 취소된다. 호스트 해석은
+        // 은행 코드 형식을 검증하므로 실패할 수 있어 안전하게 처리한다.
+        val host = runCatching { appProperties.webClientFanOut.resolveMockBaseUrl(bankCode) }
+            .getOrDefault("unresolved")
+        return BankCallResult(
+            runId = runId,
+            bankCode = bankCode,
+            host = host,
+            url = "/api/v1/mock-external/banks/$bankCode/loan-limit",
+            httpStatus = null,
+            success = false,
+            responseCode = responseCode,
+            responseMessage = responseMessage,
+            approvedLimit = null,
+            latencyMs = 0,
+            errorDetail = e.message,
+            requestPayload = "{}",
+            responsePayload = "{}",
+            requestedAt = now,
+            respondedAt = now,
+        )
     }
 
     companion object {

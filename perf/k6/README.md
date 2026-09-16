@@ -72,8 +72,41 @@ pool 512/1024 회차가 `io.parallelism` 기본값 차이로 교란됐던 것이
 | 로그 패턴 | 의미 |
 | --- | --- |
 | `Background fan-out completed ... status=COMPLETED` | 50/50 전부 성공 |
-| `Background fan-out completed ... status=PARTIAL` | 일부 은행만 응답 |
-| `Run marked as FAILED ... did not accept task` | 풀 거부 |
+| `Background fan-out completed ... status=PARTIAL_FAILURE` | 일부 은행만 성공 |
+| `Background fan-out completed ... status=FAILED` | fan-out은 끝났으나 성공한 은행이 0 (전 은행 거부 등) |
+| `Run marked as FAILED` | fan-out 자체가 예외로 중단됨 |
+| `Bank call submission rejected bankCode=` | 풀이 그 은행 호출을 거부 (부하 신호) |
+| `Bank call submission failed bankCode=` | 제출 단계 실패 — 설정·코드 문제, 부하와 무관 |
+| `Result persistence failed bankCode=` | 그 은행 결과를 DB에 저장 실패 |
+
+**저장 실패는 run 상태에 반영되지 않는다.** `finalizeRunStatus` 는 저장된 행만 세고
+요청한 은행 수와 비교하지 않으므로, 50개 중 47개만 저장돼도 남은 행이 전부 성공이면
+`COMPLETED` 다. 부분 성공을 따로 구분하지 않기로 한 결정이다. 그래서 저장 실패가
+있었던 회차는 **실효 처리율이 실제보다 높게** 나오며, `parse.mjs` 의 경고가 그것을
+알리는 유일한 신호다.
+
+앞의 세 `status=` 행이 서로 배타적이고 합이 run 수와 같다. `Run marked as FAILED`는
+그 앞 단계에서 터진 경우라 별도로 센다.
+
+**거부와 저장 실패는 은행 단위로 집계한다.** 은행 하나가 막혀도 나머지는 계속
+호출되고 기록된다. 실패 종류에 따라 막는 자리가 다르다.
+
+- 저장 실패 — `LoanLimitQueryOrchestrator` 가 `onEachResult` 를 감싼다. 정의되는
+  곳이 한 곳뿐이라 네 모드가 자동으로 같은 정책을 쓴다
+- 제출 실패(알 수 없는 은행 코드, 직렬화 오류) — 모드마다 구조가 달라 각
+  executor가 맡는다. coroutine·sequential은 `try` 범위, webclient는 `Mono.defer`,
+  async-threadpool은 `RejectedExecutionException` 분류
+- 풀 거부 — async-threadpool에만 해당. `REJECTED` 로 기록
+
+측정 부작용 하나. 거부된 은행도 결과 행을 남기므로, 예전에 첫 거부에서 run이
+중단되던 때보다 **포화 지점에서 DB 쓰기가 늘어난다.** 천장 근처에서 DB로 부하가
+옮겨가 관측되는 천장 자체가 움직일 수 있다.
+
+그래서 **v1~v14의 FAILED 수치와 직접 비교할 수 없다.** 그때는 은행 하나만
+거부돼도 run 전체가 FAILED였고 보고서들이 그것을 "fail-fast"로 해석했다.
+지금은 통과한 은행이 있으면 `PARTIAL_FAILURE` 가 되고, 막힌 은행 수가
+`REJECTED` 행으로 남는다. 몇 개가 막혔는지 알 수 있어 더 정확하지만
+기준이 달라졌다. v15가 새 기준선인 이유 중 하나다.
 
 SSM stdout이 24,000자에서 잘리므로 로그 원본은 가져오지 않는다. A에서
 세고 숫자만 받는다. 원본은 A의 `/var/log/bench/` 에 남는다.

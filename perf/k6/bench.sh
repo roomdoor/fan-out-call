@@ -127,10 +127,14 @@ collect_counts() {
 mkdir -p /var/log/bench
 docker logs gateway > /var/log/bench/$(echo "${run_id}" | tr '/' '_').log 2>&1
 L=/var/log/bench/$(echo "${run_id}" | tr '/' '_').log
-printf '{"completed":%s,"partial":%s,"failed":%s}' \
+printf '{"completed":%s,"partial":%s,"failed":%s,"run_errors":%s,"rejected_calls":%s,"submit_errors":%s,"persist_failures":%s}' \
   "\$(grep -c 'Background fan-out completed.*status=COMPLETED' \$L || true)" \
   "\$(grep -c 'Background fan-out completed.*status=PARTIAL' \$L || true)" \
-  "\$(grep -c 'Run marked as FAILED' \$L || true)"
+  "\$(grep -c 'Background fan-out completed.*status=FAILED' \$L || true)" \
+  "\$(grep -c 'Run marked as FAILED' \$L || true)" \
+  "\$(grep -c 'Bank call submission rejected' \$L || true)" \
+  "\$(grep -c 'Bank call submission failed' \$L || true)" \
+  "\$(grep -c 'Result persistence failed bankCode' \$L || true)"
 SCRIPT
 )"
 }
