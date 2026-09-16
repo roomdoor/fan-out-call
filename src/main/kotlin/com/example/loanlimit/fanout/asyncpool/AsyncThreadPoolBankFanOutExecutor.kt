@@ -36,47 +36,24 @@ class AsyncThreadPoolBankFanOutExecutor(
                 "perCallTimeoutMs=${appProperties.banks.perCallTimeoutMs}",
         )
 
-        // 은행 호출 자체는 여전히 블로킹이다. AsyncBankCallWorker가 @Async 풀
-        // 스레드에서 응답까지 스레드를 점유하는 구조는 이 모드의 본질이라 그대로 둔다.
-        //
-        // 바뀐 것은 완료를 기다리는 방식이다. 이전에는 allOf().join() 으로
-        // Dispatchers.IO 워커 하나를 run이 끝날 때까지(~31초) 하드 블로킹했다.
-        // 결과 저장(persistResultWithRetry)도 같은 IO 디스패처를 필요로 하므로,
-        // 동시 run이 IO 워커 수(기본 64)를 넘으면 저장할 워커가 남지 않아
-        // join()이 영원히 반환되지 않는 교착이 발생했다. 64 / 31s 는 약 124 RPM 이다.
-        //
-        // await()는 서스펜드라 대기 중에 워커를 반납한다.
-        //
-        // 저장 실패 격리는 LoanLimitQueryOrchestrator가 onEachResult를 감싸서
-        // 처리한다. 네 모드가 같은 정책을 쓰도록 한 곳에 뒀다.
-        // 제출 실패 격리는 모드마다 구조가 달라 각 executor가 맡는다.
+        // join()이 아니라 await()다. join()은 IO 워커를 run이 끝날 때까지
+        // 붙잡는데 결과 저장도 같은 디스패처를 쓰므로, 동시 run이 워커 수를
+        // 넘으면 교착한다(기본 64 워커 / 31초 = 약 124 RPM).
         coroutineScope {
             banks.map { bank ->
                 async(Dispatchers.IO) {
-                    // 풀이 거부하면(queue 가득 + maxPool 도달) @Async 프록시가
-                    // 퓨처를 만들기 전에 동기적으로 던진다. 그대로 두면 형제 은행이
-                    // 전부 취소되고 이미 받아온 결과까지 버려진다. 은행 하나가
-                    // 거부된 것이므로 그 은행의 실패로 기록한다.
-                    //
-                    // 동기적으로 오는 것은 RejectedExecutionException 뿐이다.
-                    // 워커 본문(registry.get, buildRequest)의 실패는 @Async라
-                    // 퓨처가 예외적으로 완료되는 형태로 온다.
                     val result = try {
                         asyncBankCallWorker.call(runId, bank, request).await()
                     } catch (e: CancellationException) {
-                        // 취소는 실패가 아니다. 삼키면 진행 중인 호출이
-                        // REJECTED 행으로 기록되고 취소가 전파되지 않는다.
                         throw e
                     } catch (e: RejectedExecutionException) {
+                        // 풀 거부는 @Async 프록시가 동기적으로 던진다.
+                        // 그냥 두면 형제 은행이 전부 취소된다.
                         log.warn("Bank call submission rejected bankCode=$bank message=${e.message}")
                         submissionFailure(runId, bank, "REJECTED", "Executor rejected bank call", e)
                     } catch (e: Exception) {
-                        // 거부가 아닌 제출 단계 실패(알 수 없는 은행 코드, 요청 직렬화 등).
-                        // 독립성은 유지하되 REJECTED와 섞지 않는다 — 섞으면
-                        // 거부 카운트가 설정 오류까지 세게 된다.
-                        //
-                        // EXCEPTION은 AsyncBankCallWorker가 평범한 타임아웃·HTTP
-                        // 오류에 이미 쓰는 코드라 DB에서 구분이 안 된다. 별도 코드를 쓴다.
+                        // 설정 오류 등. REJECTED(부하 신호)와 EXCEPTION(호출 실패)
+                        // 어느 쪽과도 섞이면 안 되므로 별도 코드를 쓴다.
                         log.warn("Bank call submission failed bankCode=$bank errorType=${e::class.simpleName} message=${e.message}")
                         submissionFailure(runId, bank, "SUBMIT_ERROR", "Bank call submission failed", e)
                     }

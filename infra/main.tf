@@ -21,18 +21,15 @@ provider "aws" {
   }
 }
 
-# MySQL 비밀번호. 저장소에는 들어가지 않는다.
-# state에는 평문으로 저장되므로 infra/.gitignore가 tfstate를 막고 있다.
-# destroy/recreate 전까지는 같은 값이 유지된다(keepers 미사용).
+# state에 평문으로 남으므로 .gitignore가 tfstate를 막고 있다.
+# destroy 전까지는 같은 값이 유지된다(keepers 미사용).
 resource "random_password" "db" {
   length  = 32
   special = false
 }
 
-# 비밀번호를 user-data에 넣지 않는다. user-data는 인스턴스의 모든 프로세스가
-# IMDS(169.254.169.254/latest/user-data)로 읽을 수 있고, 게이트웨이 컨테이너는
-# --network host로 돌기 때문에 그 안에서도 읽힌다. ec2:DescribeInstanceAttribute
-# 권한자도 볼 수 있다. SecureString으로 두고 부팅 때 받아간다.
+# user-data에 넣지 않는다. IMDS로 인스턴스의 모든 프로세스가 읽을 수 있고,
+# 게이트웨이는 --network host 라 컨테이너 안에서도 읽힌다.
 resource "aws_ssm_parameter" "db_password" {
   name  = "/${var.name_prefix}/db-password"
   type  = "SecureString"
@@ -45,8 +42,7 @@ data "aws_availability_zones" "available" {
   state = "available"
 }
 
-# 세 인스턴스를 한 AZ에 몰아넣는다. AZ가 갈리면 통신이 AZ 간 경로를 타고
-# 지연과 요금이 붙는데, 이 측정에서는 둘 다 순수한 오염이다.
+# 세 인스턴스를 한 AZ에 둔다. AZ가 갈리면 지연과 요금이 붙어 측정이 오염된다.
 locals {
   az = data.aws_availability_zones.available.names[0]
 }
@@ -108,10 +104,8 @@ resource "aws_route_table_association" "public" {
 # 루프백에만 바인딩되므로 인바운드 규칙 자체가 필요 없다.
 # ---------------------------------------------------------------------------
 
-# 인라인 ingress/egress 블록과 standalone rule 리소스를 같은 보안 그룹에
-# 섞으면 안 된다. 섞으면 refresh가 실제 규칙을 인라인 속성으로 읽어들이고,
-# 설정에는 없으므로 다음 apply가 그 규칙을 지운다. 측정 도중에 끊긴다.
-# 그래서 egress도 전부 standalone으로 둔다.
+# 인라인 규칙과 standalone rule 리소스를 섞으면 다음 apply가 규칙을 지운다.
+# 그래서 egress도 standalone으로 둔다.
 resource "aws_security_group" "gateway" {
   name        = "${var.name_prefix}-gateway"
   description = "A host - gateway"
@@ -228,10 +222,8 @@ resource "aws_iam_instance_profile" "instance" {
   role = aws_iam_role.instance.name
 }
 
-# k6 전용 역할. bench_control(게이트웨이에 RunShellScript 실행)을 세 대가
-# 공유하는 역할에 붙이면, mock 호스트와 게이트웨이 자신의 --network host
-# 컨테이너에서도 측정 대상에 root 명령을 쏠 수 있다. 명령을 보내는 쪽은
-# C 하나뿐이므로 거기만 준다.
+# k6 전용 역할. 명령을 보내는 쪽은 C 하나뿐인데 공용 역할에 붙이면
+# mock 호스트와 게이트웨이 컨테이너에서도 측정 대상에 root 명령을 쏠 수 있다.
 resource "aws_iam_role" "k6" {
   name               = "${var.name_prefix}-k6"
   assume_role_policy = data.aws_iam_policy_document.ec2_assume.json
@@ -278,15 +270,9 @@ data "aws_iam_policy_document" "param_read" {
     resources = [aws_ssm_parameter.db_password.arn]
   }
 
-  # SecureString 복호화.
-  #
-  # Resource에 alias ARN을 쓰면 안 된다. IAM은 kms:Decrypt를 키 ARN
-  # (...:key/mrk-...)으로 평가하므로 alias는 절대 매칭되지 않고, 부팅 때
-  # get-parameter --with-decryption 이 AccessDenied로 막혀 user-data가
-  # set -e 로 중단된다. apply는 성공한 것처럼 보이고 A 호스트만 죽는다.
-  #
-  # 키 ARN을 조회해 박는 대신 ViaService 조건으로 좁힌다. SSM을 통한
-  # 복호화만 허용되므로 이 역할로 다른 경로의 복호화는 할 수 없다.
+  # SecureString 복호화. Resource에 alias ARN을 쓰면 안 된다 — IAM은 키
+  # ARN으로 평가하므로 매칭되지 않고 부팅이 AccessDenied로 막힌다.
+  # ViaService 조건으로 좁혀서 SSM 경유 복호화만 허용한다.
   statement {
     actions   = ["kms:Decrypt"]
     resources = ["*"]
@@ -337,17 +323,11 @@ resource "aws_instance" "mock" {
     latency     = var.mock_latency
   })
 
-  # user_data는 기본적으로 인스턴스를 교체하지 않는다. 그러면 mock_latency나
-  # k6_version 을 바꿔 apply해도 부팅 스크립트가 다시 돌지 않아, 속성만
-  # 갱신되고 호스트는 옛 설정 그대로다. apply는 성공으로 보고한다.
-  # ami를 ignore_changes로 묶으면서 "이미지 교체가 우연히 재부팅해 주던"
-  # 경로도 사라졌으므로 명시적으로 켠다.
+  # 기본값이 false라 설정을 바꿔도 부팅 스크립트가 다시 돌지 않는다.
   user_data_replace_on_change = true
 
-  # ami는 변경 시 인스턴스를 교체한다. AL2023 SSM 파라미터는 AWS가 새
-  # 이미지를 낼 때마다 바뀌므로, 측정 중에 mock_latency 하나 고치려고
-  # apply를 돌리면 세 호스트가 통째로 재생성되고 /var/log/bench/ 와
-  # 진행 중인 회차가 사라진다. 이미지를 바꾸려면 destroy 후 다시 만든다.
+  # AL2023 SSM 파라미터는 새 이미지가 나올 때마다 바뀌고 ami는 교체를
+  # 강제한다. 측정 중 apply 한 번에 세 호스트와 로그가 날아간다.
   lifecycle {
     ignore_changes = [ami]
   }

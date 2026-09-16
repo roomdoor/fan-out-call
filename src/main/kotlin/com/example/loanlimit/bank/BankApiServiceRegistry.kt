@@ -28,14 +28,8 @@ class BankApiServiceRegistry(
     }
 
     /**
-     * 실패 행 생성. 모든 모드가 이걸 쓴다.
-     *
-     * executor마다 따로 만들면 같은 은행이 모드에 따라 다른 host로 기록된다.
-     * 실제로 그랬다 — coroutine/sequential은 mockBaseUrl(샤딩 무시),
-     * async-threadpool은 resolveMockBaseUrl(샤드 반영)을 쓰고 있었다.
-     *
-     * 등록되지 않은 은행 코드까지 여기서 받는다. get()이 던지는 경우라
-     * 호출부에는 만들 서비스가 없는데, 그 처리를 네 군데에 흩어놓지 않는다.
+     * 실패 행 생성. 네 모드가 모두 이걸 쓴다 — 따로 만들면 host가 어긋난다.
+     * 등록되지 않은 은행 코드도 여기서 받는다(get()이 던지는 경우).
      */
     fun toFailureEntity(
         runId: Long,

@@ -67,18 +67,8 @@ class WebClientBankFanOutExecutor(
         val requestedAt = LocalDateTime.now()
         val started = Instant.now()
 
-        // 호출은 다른 모드와 같은 ExternalBankApiService를 쓴다. 이 모드만
-        // webClient.post()로 URL과 타임아웃을 따로 조립하고 있었다.
-        // (커넥션 풀은 이미 sharedBankWebClient로 공유하고 있었다.)
-        //
-        // 다만 mono { callApiNonBlocking(...) } 로 감싸면 안 된다. 호출마다
-        // 코루틴 디스패처를 한 번 거치게 되어 이 모드가 coroutine 모드와
-        // 같아진다. 두 모드의 차이가 정확히 그 지점이므로 Mono를 그대로 받는다.
-        //
-        // 준비 단계(registry.get, buildRequest)도 Mono 안에서 실행한다.
-        // 밖에 두면 flatMap 매퍼에서 던져 Flux 전체가 에러로 끝나고 나머지
-        // 은행의 구독이 취소된다. defer 안이면 에러 신호가 되어 아래
-        // onErrorResume이 그 은행의 실패로 바꿔준다.
+        // 준비 단계까지 defer 안에 둔다. 밖에서 던지면 flatMap 매퍼가 터져
+        // Flux 전체가 끝나고 나머지 은행의 구독이 취소된다.
         val payloadRef = AtomicReference("{}")
 
         return Mono.defer {
