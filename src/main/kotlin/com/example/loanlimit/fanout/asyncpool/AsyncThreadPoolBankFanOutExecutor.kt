@@ -11,6 +11,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.future.await
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Component
+import java.time.LocalDateTime
 
 @Component
 class AsyncThreadPoolBankFanOutExecutor(
@@ -47,13 +48,49 @@ class AsyncThreadPoolBankFanOutExecutor(
         coroutineScope {
             banks.map { bank ->
                 async(Dispatchers.IO) {
-                    val result = asyncBankCallWorker.call(runId, bank, request).await()
+                    // 풀이 거부하면(queue 가득 + maxPool 도달) @Async 프록시가
+                    // 퓨처를 만들기 전에 동기적으로 던진다. 그대로 두면 형제 은행이
+                    // 전부 취소되고 이미 받아온 결과까지 버려진다. 은행 하나가
+                    // 거부된 것이므로 그 은행의 실패로 기록한다.
+                    val result = try {
+                        asyncBankCallWorker.call(runId, bank, request).await()
+                    } catch (e: Exception) {
+                        log.warn("Bank call submission rejected bankCode=$bank errorType=${e::class.simpleName} message=${e.message}")
+                        rejectedResult(runId, bank, e)
+                    }
                     onEachResult(result)
                 }
             }.awaitAll()
         }
 
         log.info("Async-threadpool fan-out finished bankCount=${banks.size}")
+    }
+
+    // 제출 자체가 거부된 은행. 요청을 만들기 전이라 payload는 비어 있다.
+    // responseCode를 EXCEPTION과 구분해 두면 로그에서 풀 거부를 따로 셀 수 있다.
+    private fun rejectedResult(
+        runId: Long,
+        bankCode: String,
+        e: Exception,
+    ): BankCallResult {
+        val now = LocalDateTime.now()
+        return BankCallResult(
+            runId = runId,
+            bankCode = bankCode,
+            host = appProperties.webClientFanOut.resolveMockBaseUrl(bankCode),
+            url = "/api/v1/mock-external/banks/$bankCode/loan-limit",
+            httpStatus = null,
+            success = false,
+            responseCode = "REJECTED",
+            responseMessage = "Executor rejected bank call",
+            approvedLimit = null,
+            latencyMs = 0,
+            errorDetail = e.message,
+            requestPayload = "{}",
+            responsePayload = "{}",
+            requestedAt = now,
+            respondedAt = now,
+        )
     }
 
     companion object {
