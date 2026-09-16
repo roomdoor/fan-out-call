@@ -232,7 +232,6 @@ resource "aws_iam_instance_profile" "instance" {
 # 회차마다 게이트웨이를 재기동하고 로그 카운트를 받아오기 위한 권한이다.
 # 대상은 이 스택의 인스턴스와 RunShellScript 문서로 한정한다.
 data "aws_region" "current" {}
-data "aws_caller_identity" "current" {}
 
 data "aws_iam_policy_document" "bench_control" {
   statement {
@@ -260,10 +259,24 @@ data "aws_iam_policy_document" "param_read" {
     resources = [aws_ssm_parameter.db_password.arn]
   }
 
-  # SecureString 복호화. 계정 기본 SSM 키로만 제한한다.
+  # SecureString 복호화.
+  #
+  # Resource에 alias ARN을 쓰면 안 된다. IAM은 kms:Decrypt를 키 ARN
+  # (...:key/mrk-...)으로 평가하므로 alias는 절대 매칭되지 않고, 부팅 때
+  # get-parameter --with-decryption 이 AccessDenied로 막혀 user-data가
+  # set -e 로 중단된다. apply는 성공한 것처럼 보이고 A 호스트만 죽는다.
+  #
+  # 키 ARN을 조회해 박는 대신 ViaService 조건으로 좁힌다. SSM을 통한
+  # 복호화만 허용되므로 이 역할로 다른 경로의 복호화는 할 수 없다.
   statement {
     actions   = ["kms:Decrypt"]
-    resources = ["arn:aws:kms:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:alias/aws/ssm"]
+    resources = ["*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "kms:ViaService"
+      values   = ["ssm.${data.aws_region.current.name}.amazonaws.com"]
+    }
   }
 }
 
