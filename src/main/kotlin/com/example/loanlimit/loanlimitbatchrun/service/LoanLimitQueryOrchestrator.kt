@@ -18,6 +18,7 @@ import org.springframework.stereotype.Service
 import org.springframework.web.server.ResponseStatusException
 import com.example.loanlimit.logging.MdcKeys
 import com.example.loanlimit.logging.restoreMdc
+import java.util.concurrent.atomic.AtomicInteger
 
 @Service
 class LoanLimitQueryOrchestrator(
@@ -96,12 +97,35 @@ class LoanLimitQueryOrchestrator(
         try {
             log.info("Background fan-out started bankCount=${banks.size} mode=$modeName")
 
+            // 저장 실패를 은행 단위로 가둔다. 여기서 예외가 밖으로 나가면 모드마다
+            // 다른 방식으로 나머지 은행을 망가뜨린다 — coroutine은 형제 코루틴을
+            // 취소하고, sequential은 남은 은행을 호출조차 하지 않으며, webclient는
+            // Flux 전체를 에러로 끝낸다. onEachResult가 정의되는 곳이 여기 한 곳뿐이라
+            // 여기서 막으면 네 모드의 동작이 같아진다.
+            //
+            // 실패한 은행은 행이 저장되지 않으므로 finalizeRunStatus가 세는
+            // completedCount에서 빠지고, run은 PARTIAL_FAILURE가 된다. DB 쓰기 하나
+            // 때문에 run 전체를 FAILED로 만드는 것보다 사실에 가깝다.
+            val persistFailures = AtomicInteger()
+
             fanOutExecutor.execute(
                 runId = runId,
                 banks = banks,
                 request = request,
             ) { result ->
-                bankCallResultService.persistResultWithRetry(result)
+                runCatching { bankCallResultService.persistResultWithRetry(result) }
+                    .onFailure { e ->
+                        persistFailures.incrementAndGet()
+                        log.error("Result persistence failed bankCode=${result.bankCode}", e)
+                    }
+            }
+
+            val failedPersists = persistFailures.get()
+            if (failedPersists > 0) {
+                log.error(
+                    "Result persistence failed for $failedPersists/${banks.size} banks. " +
+                        "Run status counts only persisted results.",
+                )
             }
 
             loanLimitBatchRunService.finalizeRunStatus(runId)
