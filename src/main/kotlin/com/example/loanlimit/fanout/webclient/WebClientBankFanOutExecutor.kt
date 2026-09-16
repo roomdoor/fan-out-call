@@ -73,30 +73,26 @@ class WebClientBankFanOutExecutor(
         val requestedAt = LocalDateTime.now()
         val started = Instant.now()
 
-        // 준비 단계(registry.get, resolveMockBaseUrl, buildRequest)도 Mono 안에서
-        // 실행한다. 밖에 두면 flatMap 매퍼에서 던져 Flux 전체가 에러로 끝나고
-        // 나머지 은행의 구독이 취소된다. defer 안에서 던지면 에러 신호가 되어
-        // 아래 onErrorResume이 그 은행의 실패로 바꿔준다.
+        // 호출은 다른 모드와 같은 ExternalBankApiService를 쓴다. 이 모드만
+        // webClient.post()를 직접 만들고 있어서 공유 커넥션 풀 설정이
+        // 적용되지 않던 문제가 있었다.
         //
-        // onErrorResume이 값을 읽어야 하므로 참조로 넘긴다. 준비 단계에서 터지면
-        // 기본값이 그대로 쓰인다.
+        // 다만 mono { callApiNonBlocking(...) } 로 감싸면 안 된다. 호출마다
+        // 코루틴 디스패처를 한 번 거치게 되어 이 모드가 coroutine 모드와
+        // 같아진다. 두 모드의 차이가 정확히 그 지점이므로 Mono를 그대로 받는다.
+        //
+        // 준비 단계(registry.get, buildRequest)도 Mono 안에서 실행한다.
+        // 밖에 두면 flatMap 매퍼에서 던져 Flux 전체가 에러로 끝나고 나머지
+        // 은행의 구독이 취소된다. defer 안이면 에러 신호가 되어 아래
+        // onErrorResume이 그 은행의 실패로 바꿔준다.
         val payloadRef = AtomicReference("{}")
-        val hostRef = AtomicReference(appProperties.webClientFanOut.mockBaseUrl)
 
         return Mono.defer {
             val bankService = bankApiServiceRegistry.get(bankCode)
-            val mockBaseUrl = appProperties.webClientFanOut.resolveMockBaseUrl(bankCode)
-            hostRef.set(mockBaseUrl)
             val requestPayload = bankService.buildRequest(request)
             payloadRef.set(requestPayload)
 
-            webClient.post()
-                .uri("$mockBaseUrl$bankApiPath")
-                .bodyValue(request)
-                .attribute("bankCode", bankCode)
-                .retrieve()
-                .bodyToMono<MockExternalCallResult>()
-                .timeout(Duration.ofMillis(appProperties.banks.perCallTimeoutMs))
+            bankService.callApiReactive(request, requestPayload)
                 .map { response ->
                     bankService.toEntity(
                         runId = runId,
@@ -113,20 +109,14 @@ class WebClientBankFanOutExecutor(
                 log.warn("Bank call failed latencyMs=$latencyMs errorType=${e::class.simpleName} message=${e.message}")
 
                 Mono.just(
-                    BankCallResult(
+                    bankApiServiceRegistry.toFailureEntity(
                         runId = runId,
                         bankCode = bankCode,
-                        host = hostRef.get(),
-                        url = bankApiPath,
-                        httpStatus = null,
-                        success = false,
+                        requestPayload = payloadRef.get(),
                         responseCode = "EXCEPTION",
                         responseMessage = "External call failed",
-                        approvedLimit = null,
-                        latencyMs = latencyMs,
                         errorDetail = e.message,
-                        requestPayload = payloadRef.get(),
-                        responsePayload = "{}",
+                        latencyMs = latencyMs,
                         requestedAt = requestedAt,
                         respondedAt = LocalDateTime.now(),
                     ),

@@ -1,8 +1,11 @@
 package com.example.loanlimit.fanout.asyncpool
 
+import com.example.loanlimit.bank.BankApiServiceRegistry
 import com.example.loanlimit.bankcallresult.entity.BankCallResult
+import com.example.loanlimit.bankcallresult.service.BankCatalogService
 import com.example.loanlimit.config.AppProperties
 import com.example.loanlimit.loanlimitbatchrun.dto.request.LoanLimitQueryRequest
+import org.springframework.web.reactive.function.client.WebClient
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -12,7 +15,6 @@ import org.junit.jupiter.api.assertThrows
 import java.time.LocalDateTime
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.RejectedExecutionException
-import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * 은행 하나의 제출 실패가 나머지 은행을 망가뜨리지 않는지 고정한다.
@@ -24,6 +26,14 @@ import java.util.concurrent.atomic.AtomicInteger
 class AsyncThreadPoolBankFanOutExecutorTest {
 
     private val banks = listOf("BANK-01", "BANK-02", "BANK-03")
+
+    // 실패 행 생성이 레지스트리로 옮겨졌다. 카탈로그에 이 은행들이 있어야
+    // host가 샤드 기준으로 채워진다.
+    private val registry = BankApiServiceRegistry(
+        bankCatalogService = BankCatalogService(AppProperties()),
+        appProperties = AppProperties(),
+        webClient = WebClient.builder().build(),
+    )
     private val request = LoanLimitQueryRequest(
         borrowerId = "USER-1",
         annualIncome = 70_000_000,
@@ -33,7 +43,7 @@ class AsyncThreadPoolBankFanOutExecutorTest {
     @Test
     fun `풀이 거부한 은행만 REJECTED로 기록되고 나머지는 정상 처리된다`() {
         val worker = StubWorker(failOn = "BANK-02", error = RejectedExecutionException("pool full"))
-        val executor = AsyncThreadPoolBankFanOutExecutor(AppProperties(), worker)
+        val executor = AsyncThreadPoolBankFanOutExecutor(AppProperties(), worker, registry)
 
         val results = collect(executor)
 
@@ -56,7 +66,7 @@ class AsyncThreadPoolBankFanOutExecutorTest {
         // EXCEPTION은 AsyncBankCallWorker가 평범한 호출 실패에 쓰는 코드라
         // 그것도 쓰면 DB에서 구분되지 않는다.
         val worker = StubWorker(failOn = "BANK-03", error = IllegalStateException("unknown bank"))
-        val executor = AsyncThreadPoolBankFanOutExecutor(AppProperties(), worker)
+        val executor = AsyncThreadPoolBankFanOutExecutor(AppProperties(), worker, registry)
 
         val results = collect(executor)
 
@@ -69,14 +79,14 @@ class AsyncThreadPoolBankFanOutExecutorTest {
         // 취소를 실패 결과로 바꾸면 진행 중인 호출이 REJECTED 행으로 남고
         // 취소가 상위로 전달되지 않는다.
         val worker = StubWorker(failOn = "BANK-01", error = CancellationException("cancelled"))
-        val executor = AsyncThreadPoolBankFanOutExecutor(AppProperties(), worker)
+        val executor = AsyncThreadPoolBankFanOutExecutor(AppProperties(), worker, registry)
 
         assertThrows<CancellationException> { collect(executor) }
     }
 
     @Test
     fun `모두 성공하면 은행 수만큼 결과가 전달된다`() {
-        val executor = AsyncThreadPoolBankFanOutExecutor(AppProperties(), StubWorker())
+        val executor = AsyncThreadPoolBankFanOutExecutor(AppProperties(), StubWorker(), registry)
 
         val results = collect(executor)
 
@@ -101,16 +111,13 @@ class AsyncThreadPoolBankFanOutExecutorTest {
     private class StubWorker(
         private val failOn: String? = null,
         private val error: Throwable? = null,
-    ) : AsyncBankCallWorker(AppProperties(), throwingRegistry()) {
-
-        val calls = AtomicInteger()
+    ) : AsyncBankCallWorker(AppProperties(), STUB_REGISTRY) {
 
         override fun call(
             runId: Long,
             bankCode: String,
             request: LoanLimitQueryRequest,
         ): CompletableFuture<BankCallResult> {
-            calls.incrementAndGet()
             if (bankCode == failOn && error != null) {
                 throw error
             }
@@ -138,18 +145,16 @@ class AsyncThreadPoolBankFanOutExecutorTest {
             )
         }
 
-        companion object {
-            // 대역은 레지스트리를 쓰지 않는다. 호출되면 테스트가 잘못된 것이다.
-            private fun throwingRegistry() =
-                com.example.loanlimit.bank.BankApiServiceRegistry(
-                    bankCatalogService = com.example.loanlimit.bankcallresult.service.BankCatalogService(AppProperties()),
-                    appProperties = AppProperties(),
-                    webClient = org.springframework.web.reactive.function.client.WebClient.builder().build(),
-                )
-        }
     }
 
     companion object {
         private const val RUN_ID = 1L
+
+        // 대역은 super 생성자에만 필요하고 실제로 쓰지 않는다.
+        private val STUB_REGISTRY = BankApiServiceRegistry(
+            bankCatalogService = BankCatalogService(AppProperties()),
+            appProperties = AppProperties(),
+            webClient = WebClient.builder().build(),
+        )
     }
 }
