@@ -18,7 +18,10 @@ fs.file-max = 2097152
 vm.max_map_count = 1048576
 
 # 은행 50곳으로 나가는 동시 커넥션이 9 x RPM 규모다.
-net.ipv4.ip_local_port_range = 1024 65535
+# 하한을 1024로 내리면 게이트웨이가 듣는 8080이 임시 포트 범위에 들어간다.
+# sweep은 회차마다 게이트웨이를 재기동하는데, 그 사이 아웃바운드 커넥션이
+# 8080을 선점하면 기동이 Address already in use로 실패하고 회차가 날아간다.
+net.ipv4.ip_local_port_range = 10240 65535
 net.core.somaxconn = 65535
 net.ipv4.tcp_max_syn_backlog = 65535
 net.ipv4.tcp_tw_reuse = 1

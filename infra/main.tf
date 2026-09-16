@@ -228,6 +228,25 @@ resource "aws_iam_instance_profile" "instance" {
   role = aws_iam_role.instance.name
 }
 
+# k6 전용 역할. bench_control(게이트웨이에 RunShellScript 실행)을 세 대가
+# 공유하는 역할에 붙이면, mock 호스트와 게이트웨이 자신의 --network host
+# 컨테이너에서도 측정 대상에 root 명령을 쏠 수 있다. 명령을 보내는 쪽은
+# C 하나뿐이므로 거기만 준다.
+resource "aws_iam_role" "k6" {
+  name               = "${var.name_prefix}-k6"
+  assume_role_policy = data.aws_iam_policy_document.ec2_assume.json
+}
+
+resource "aws_iam_role_policy_attachment" "k6_ssm" {
+  role       = aws_iam_role.k6.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+resource "aws_iam_instance_profile" "k6" {
+  name = "${var.name_prefix}-k6"
+  role = aws_iam_role.k6.name
+}
+
 # bench.sh는 C(k6)에서 돌면서 A(게이트웨이)를 SSM으로 제어한다.
 # 회차마다 게이트웨이를 재기동하고 로그 카운트를 받아오기 위한 권한이다.
 # 대상은 이 스택의 인스턴스와 RunShellScript 문서로 한정한다.
@@ -288,7 +307,7 @@ resource "aws_iam_role_policy" "param_read" {
 
 resource "aws_iam_role_policy" "bench_control" {
   name   = "${var.name_prefix}-bench-control"
-  role   = aws_iam_role.instance.id
+  role   = aws_iam_role.k6.id
   policy = data.aws_iam_policy_document.bench_control.json
 }
 
@@ -318,6 +337,14 @@ resource "aws_instance" "mock" {
     latency     = var.mock_latency
   })
 
+  # ami는 변경 시 인스턴스를 교체한다. AL2023 SSM 파라미터는 AWS가 새
+  # 이미지를 낼 때마다 바뀌므로, 측정 중에 mock_latency 하나 고치려고
+  # apply를 돌리면 세 호스트가 통째로 재생성되고 /var/log/bench/ 와
+  # 진행 중인 회차가 사라진다. 이미지를 바꾸려면 destroy 후 다시 만든다.
+  lifecycle {
+    ignore_changes = [ami]
+  }
+
   tags = { Name = "${var.name_prefix}-mock" }
 }
 
@@ -345,6 +372,10 @@ resource "aws_instance" "gateway" {
   # 부팅 직후 SSM에서 비밀번호를 받아가므로 정책이 먼저 있어야 한다.
   depends_on = [aws_instance.mock, aws_iam_role_policy.param_read]
 
+  lifecycle {
+    ignore_changes = [ami]
+  }
+
   tags = { Name = "${var.name_prefix}-gateway" }
 }
 
@@ -353,7 +384,7 @@ resource "aws_instance" "k6" {
   instance_type          = var.k6_instance_type
   subnet_id              = aws_subnet.public.id
   vpc_security_group_ids = [aws_security_group.k6.id]
-  iam_instance_profile   = aws_iam_instance_profile.instance.name
+  iam_instance_profile   = aws_iam_instance_profile.k6.name
 
   root_block_device {
     volume_size = var.root_volume_gb
@@ -368,9 +399,14 @@ resource "aws_instance" "k6" {
     shard_count         = var.mock_shard_count
     region              = var.region
     repo_ref            = var.repo_ref
+    k6_version          = var.k6_version
   })
 
   depends_on = [aws_instance.gateway]
+
+  lifecycle {
+    ignore_changes = [ami]
+  }
 
   tags = { Name = "${var.name_prefix}-k6" }
 }

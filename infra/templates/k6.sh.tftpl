@@ -20,7 +20,9 @@ enabled=1
 gpgcheck=1
 gpgkey=https://dl.k6.io/key.gpg
 REPO
-dnf install -y k6
+# 버전을 고정한다. 조건 추적이 이 저장소의 설계 전제인데 정작 재는 도구가
+# 미추적 변수로 남으면 안 된다. bench.sh가 manifest에도 기록한다.
+dnf install -y "k6-${k6_version}"
 
 cat > /etc/sysctl.d/99-bench.conf <<'SYSCTL'
 # VU 하나가 커넥션을 붙잡는다.
