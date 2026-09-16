@@ -1,5 +1,6 @@
 package com.example.loanlimit.fanout.asyncpool
 
+import com.example.loanlimit.bank.BankApiServiceRegistry
 import com.example.loanlimit.config.AppProperties
 import com.example.loanlimit.fanout.BankFanOutExecutor
 import com.example.loanlimit.loanlimitbatchrun.dto.request.LoanLimitQueryRequest
@@ -19,6 +20,7 @@ import java.util.concurrent.RejectedExecutionException
 class AsyncThreadPoolBankFanOutExecutor(
     private val appProperties: AppProperties,
     private val asyncBankCallWorker: AsyncBankCallWorker,
+    private val bankApiServiceRegistry: BankApiServiceRegistry,
 ) : BankFanOutExecutor {
     override suspend fun execute(
         runId: Long,
@@ -67,7 +69,7 @@ class AsyncThreadPoolBankFanOutExecutor(
                         throw e
                     } catch (e: RejectedExecutionException) {
                         log.warn("Bank call submission rejected bankCode=$bank message=${e.message}")
-                        failureResult(runId, bank, "REJECTED", "Executor rejected bank call", e)
+                        submissionFailure(runId, bank, "REJECTED", "Executor rejected bank call", e)
                     } catch (e: Exception) {
                         // 거부가 아닌 제출 단계 실패(알 수 없는 은행 코드, 요청 직렬화 등).
                         // 독립성은 유지하되 REJECTED와 섞지 않는다 — 섞으면
@@ -76,7 +78,7 @@ class AsyncThreadPoolBankFanOutExecutor(
                         // EXCEPTION은 AsyncBankCallWorker가 평범한 타임아웃·HTTP
                         // 오류에 이미 쓰는 코드라 DB에서 구분이 안 된다. 별도 코드를 쓴다.
                         log.warn("Bank call submission failed bankCode=$bank errorType=${e::class.simpleName} message=${e.message}")
-                        failureResult(runId, bank, "SUBMIT_ERROR", "Bank call submission failed", e)
+                        submissionFailure(runId, bank, "SUBMIT_ERROR", "Bank call submission failed", e)
                     }
                     onEachResult(result)
                 }
@@ -87,7 +89,7 @@ class AsyncThreadPoolBankFanOutExecutor(
     }
 
     // 제출 단계에서 끝난 은행. 호출을 보내기 전이라 payload는 비어 있다.
-    private fun failureResult(
+    private fun submissionFailure(
         runId: Long,
         bankCode: String,
         responseCode: String,
@@ -95,24 +97,14 @@ class AsyncThreadPoolBankFanOutExecutor(
         e: Exception,
     ): BankCallResult {
         val now = LocalDateTime.now()
-        // 이 함수가 던지면 격리가 깨져 형제 코루틴이 취소된다. 호스트 해석은
-        // 은행 코드 형식을 검증하므로 실패할 수 있어 안전하게 처리한다.
-        val host = runCatching { appProperties.webClientFanOut.resolveMockBaseUrl(bankCode) }
-            .getOrDefault("unresolved")
-        return BankCallResult(
+        return bankApiServiceRegistry.toFailureEntity(
             runId = runId,
             bankCode = bankCode,
-            host = host,
-            url = "/api/v1/mock-external/banks/$bankCode/loan-limit",
-            httpStatus = null,
-            success = false,
+            requestPayload = "{}",
             responseCode = responseCode,
             responseMessage = responseMessage,
-            approvedLimit = null,
-            latencyMs = 0,
             errorDetail = e.message,
-            requestPayload = "{}",
-            responsePayload = "{}",
+            latencyMs = 0,
             requestedAt = now,
             respondedAt = now,
         )

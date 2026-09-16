@@ -57,20 +57,14 @@ class AsyncBankCallWorker(
                         "errorType=${e::class.simpleName} message=${e.message}",
                 )
 
-                BankCallResult(
+                bankApiServiceRegistry.toFailureEntity(
                     runId = runId,
                     bankCode = bankCode,
-                    host = appProperties.webClientFanOut.mockBaseUrl,
-                    url = "/api/v1/mock-external/banks/$bankCode/loan-limit",
-                    httpStatus = null,
-                    success = false,
+                    requestPayload = requestPayload,
                     responseCode = "EXCEPTION",
                     responseMessage = "External call failed",
-                    approvedLimit = null,
-                    latencyMs = latencyMs,
                     errorDetail = e.message,
-                    requestPayload = requestPayload,
-                    responsePayload = "{}",
+                    latencyMs = latencyMs,
                     requestedAt = requestedAt,
                     respondedAt = LocalDateTime.now(),
                 )
