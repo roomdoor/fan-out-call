@@ -54,6 +54,10 @@ class AsyncThreadPoolBankFanOutExecutor(
                     // 퓨처를 만들기 전에 동기적으로 던진다. 그대로 두면 형제 은행이
                     // 전부 취소되고 이미 받아온 결과까지 버려진다. 은행 하나가
                     // 거부된 것이므로 그 은행의 실패로 기록한다.
+                    //
+                    // 동기적으로 오는 것은 RejectedExecutionException 뿐이다.
+                    // 워커 본문(registry.get, buildRequest)의 실패는 @Async라
+                    // 퓨처가 예외적으로 완료되는 형태로 온다.
                     val result = try {
                         asyncBankCallWorker.call(runId, bank, request).await()
                     } catch (e: CancellationException) {
@@ -67,8 +71,11 @@ class AsyncThreadPoolBankFanOutExecutor(
                         // 거부가 아닌 제출 단계 실패(알 수 없는 은행 코드, 요청 직렬화 등).
                         // 독립성은 유지하되 REJECTED와 섞지 않는다 — 섞으면
                         // 거부 카운트가 설정 오류까지 세게 된다.
+                        //
+                        // EXCEPTION은 AsyncBankCallWorker가 평범한 타임아웃·HTTP
+                        // 오류에 이미 쓰는 코드라 DB에서 구분이 안 된다. 별도 코드를 쓴다.
                         log.warn("Bank call submission failed bankCode=$bank errorType=${e::class.simpleName} message=${e.message}")
-                        failureResult(runId, bank, "EXCEPTION", "Bank call submission failed", e)
+                        failureResult(runId, bank, "SUBMIT_ERROR", "Bank call submission failed", e)
                     }
                     onEachResult(result)
                 }

@@ -50,16 +50,18 @@ class AsyncThreadPoolBankFanOutExecutorTest {
     }
 
     @Test
-    fun `거부가 아닌 제출 실패는 EXCEPTION으로 구분된다`() {
+    fun `거부가 아닌 제출 실패는 SUBMIT_ERROR로 구분된다`() {
         // 설정 오류(알 수 없는 은행 코드 등)를 풀 거부로 세면
         // 거부 카운트가 부하와 무관한 원인까지 포함하게 된다.
+        // EXCEPTION은 AsyncBankCallWorker가 평범한 호출 실패에 쓰는 코드라
+        // 그것도 쓰면 DB에서 구분되지 않는다.
         val worker = StubWorker(failOn = "BANK-03", error = IllegalStateException("unknown bank"))
         val executor = AsyncThreadPoolBankFanOutExecutor(AppProperties(), worker)
 
         val results = collect(executor)
 
         assertEquals(banks.size, results.size)
-        assertEquals("EXCEPTION", results.single { it.bankCode == "BANK-03" }.responseCode)
+        assertEquals("SUBMIT_ERROR", results.single { it.bankCode == "BANK-03" }.responseCode)
     }
 
     @Test

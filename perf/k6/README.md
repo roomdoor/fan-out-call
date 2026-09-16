@@ -75,8 +75,15 @@ pool 512/1024 회차가 `io.parallelism` 기본값 차이로 교란됐던 것이
 | `Background fan-out completed ... status=PARTIAL_FAILURE` | 일부 은행만 성공 |
 | `Background fan-out completed ... status=FAILED` | fan-out은 끝났으나 성공한 은행이 0 (전 은행 거부 등) |
 | `Run marked as FAILED` | fan-out 자체가 예외로 중단됨 |
-| `Bank call submission rejected bankCode=` | 풀이 그 은행 호출을 거부 |
+| `Bank call submission rejected bankCode=` | 풀이 그 은행 호출을 거부 (부하 신호) |
+| `Bank call submission failed bankCode=` | 제출 단계 실패 — 설정·코드 문제, 부하와 무관 |
 | `Result persistence failed bankCode=` | 그 은행 결과를 DB에 저장 실패 |
+
+**저장 실패는 run 상태에 반영되지 않는다.** `finalizeRunStatus` 는 저장된 행만 세고
+요청한 은행 수와 비교하지 않으므로, 50개 중 47개만 저장돼도 남은 행이 전부 성공이면
+`COMPLETED` 다. 부분 성공을 따로 구분하지 않기로 한 결정이다. 그래서 저장 실패가
+있었던 회차는 **실효 처리율이 실제보다 높게** 나오며, `parse.mjs` 의 경고가 그것을
+알리는 유일한 신호다.
 
 앞의 세 `status=` 행이 서로 배타적이고 합이 run 수와 같다. `Run marked as FAILED`는
 그 앞 단계에서 터진 경우라 별도로 센다.

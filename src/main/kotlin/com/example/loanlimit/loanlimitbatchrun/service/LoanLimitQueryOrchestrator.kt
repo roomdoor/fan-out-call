@@ -104,9 +104,14 @@ class LoanLimitQueryOrchestrator(
             // Flux 전체를 에러로 끝낸다. onEachResult가 정의되는 곳이 여기 한 곳뿐이라
             // 여기서 막으면 네 모드의 동작이 같아진다.
             //
-            // 실패한 은행은 행이 저장되지 않으므로 finalizeRunStatus가 세는
-            // completedCount에서 빠지고, run은 PARTIAL_FAILURE가 된다. DB 쓰기 하나
-            // 때문에 run 전체를 FAILED로 만드는 것보다 사실에 가깝다.
+            // 주의 — 저장에 실패한 은행은 행 자체가 없다. finalizeRunStatus는
+            // 저장된 행만 세고 requestedBankCount와 비교하지 않으므로, 남은 행이
+            // 전부 성공이면 run은 COMPLETED가 된다. 50개 중 47개만 저장돼도
+            // COMPLETED다. 부분 성공을 따로 구분하지 않기로 한 결정이다.
+            //
+            // 그래서 저장 실패는 상태가 아니라 로그로만 드러난다. 아래 집계 로그와
+            // parse.mjs의 경고가 유일한 신호다. 저장 실패가 있었던 회차는 실효
+            // 처리율이 실제보다 높게 나오므로 처리량 비교에 쓰면 안 된다.
             val persistFailures = AtomicInteger()
 
             fanOutExecutor.execute(
@@ -136,6 +141,12 @@ class LoanLimitQueryOrchestrator(
             }
 
             loanLimitBatchRunService.finalizeRunStatus(runId)
+        } catch (e: CancellationException) {
+            // CancellationException은 IllegalStateException을 상속하므로 아래
+            // catch(Exception)에 걸린다. 그대로 두면 이미 취소된 코루틴에서
+            // markRunFailed가 블로킹 JPA 읽기·쓰기를 하고, run_errors 수치가
+            // 부풀며, 취소는 여전히 Job에 도달하지 못한다.
+            throw e
         } catch (e: Exception) {
             log.error("Background fan-out failed", e)
             loanLimitBatchRunService.markRunFailed(runId, e.message)
