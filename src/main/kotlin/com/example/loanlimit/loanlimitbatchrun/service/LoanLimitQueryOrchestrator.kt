@@ -138,7 +138,14 @@ class LoanLimitQueryOrchestrator(
                 throw e
             } catch (e: Exception) {
                 log.error("Run status finalization failed", e)
-                loanLimitBatchRunService.markRunFailed(runId, "$FINALIZE_FAILED_PREFIX${e.message}")
+                // markRunFailed 도 커넥션을 쓴다. 풀이 마른 상황이면 이것도 터지는데,
+                // 밖으로 새면 아래 catch 가 접두사 없이 다시 기록해서 부하 증상이
+                // 코드 문제로 뒤바뀐다. 못 남기면 IN_PROGRESS 로 두는 편이 낫다.
+                try {
+                    loanLimitBatchRunService.markRunFailed(runId, "$FINALIZE_FAILED_PREFIX${e.message}")
+                } catch (ignored: Exception) {
+                    log.error("Could not mark the run as FAILED after finalization failure", ignored)
+                }
             }
         } catch (e: CancellationException) {
             // 아래 catch(Exception)이 이걸 잡아버린다(IllegalStateException 상속).

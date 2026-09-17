@@ -5,15 +5,23 @@
 // load.js 와 같은 lib/ 를 타므로, 여기서 통과하면 실측이 쓰는 경로가
 // 뚫려 있다는 뜻이다. 판정은 smoke.sh 가 DB 를 보고 한다.
 import { check } from 'k6';
-import { buildLoanLimitRequest, validateMode, BASE_URL } from './lib/common.js';
+import { buildLoanLimitRequest, validateMode, BASE_URL, MAX_WAIT_MS } from './lib/common.js';
 import { submit, pollUntilTerminal } from './lib/gateway.js';
 
 const MODES = (__ENV.MODES || 'coroutine async-threadpool webclient').trim().split(/\s+/);
 
 export const options = {
-  // 모드 수만큼 VU 를 띄워 동시에 한 건씩. 순차로 하면 모드마다 45초씩 쌓인다.
-  vus: MODES.length,
-  iterations: MODES.length,
+  scenarios: {
+    // per-vu-iterations 라야 VU 하나가 정확히 한 번 돈다. vus/iterations 만
+    // 쓰면 shared-iterations 가 되어, 한 VU 가 빨리 끝나면 남의 몫까지 가져간다
+    // (모드 하나가 두 번 돌고 다른 하나는 안 돈다).
+    one_per_mode: {
+      executor: 'per-vu-iterations',
+      vus: MODES.length,
+      iterations: 1,
+      maxDuration: `${Math.ceil(MAX_WAIT_MS / 1000) + 60}s`,
+    },
+  },
 };
 
 export function setup() {

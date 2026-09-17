@@ -33,7 +33,8 @@ echo "base url : ${BASE_URL}"
 echo "modes    : ${MODES}"
 echo ""
 
-trap 'gateway_stop || true' EXIT
+# 실패하고 끝나는 경우가 많으므로 로그를 반드시 남긴다.
+trap 'save_gateway_log smoke || true; gateway_stop || true' EXIT
 
 gateway_stop || true
 

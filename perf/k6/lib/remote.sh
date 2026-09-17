@@ -30,7 +30,15 @@ ssm_run() {
     case "${status}" in
       Success) break ;;
       Failed|Cancelled|TimedOut)
-        echo "SSM ${status}" >&2
+        # 원격 stderr 를 그대로 보여준다. gateway-run.sh 는 컨테이너가 죽으면
+        # docker logs --tail 50 을 여기에 쏟는데, 안 찍으면 왜 죽었는지 알 수 없다.
+        echo "SSM ${status}:" >&2
+        # 순서 주의: >&2 를 먼저 둬야 stdout 이 진짜 stderr 로 간다.
+        # 2>/dev/null 을 앞에 쓰면 fd2 가 이미 /dev/null 이라 출력이 통째로 사라진다.
+        aws ssm get-command-invocation \
+          --region "${AWS_REGION}" --command-id "${cmd_id}" \
+          --instance-id "${GATEWAY_INSTANCE_ID}" \
+          --query 'StandardErrorContent' --output text >&2 2>/dev/null || true
         return 1
         ;;
     esac
@@ -52,6 +60,14 @@ db_query() {
   encoded="$(printf '%s' "$1" | base64 | tr -d '\n')" || return 1
   ssm_run "echo ${encoded} | base64 -d | docker exec -i ${MYSQL_CONTAINER} sh -c 'MYSQL_PWD=\"\$MYSQL_ROOT_PASSWORD\" exec mysql -N -B -uroot ${MYSQL_DATABASE}'" \
     | tr -d '\r'
+}
+
+# 컨테이너를 지우면 로그도 같이 사라진다(json-file 드라이버). 지우기 전에
+# A 의 /var/log/bench/ 로 뺀다 — 표에서 이상이 보이면 여기를 본다.
+save_gateway_log() {
+  local name
+  name="$(printf '%s' "$1" | tr '/' '_')"
+  ssm_run "mkdir -p /var/log/bench && docker logs gateway > /var/log/bench/${name}.log 2>&1 || true" >/dev/null
 }
 
 gateway_stop() { ssm_run "docker rm -f gateway >/dev/null 2>&1 || true" >/dev/null; }

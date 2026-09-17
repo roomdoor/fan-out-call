@@ -55,6 +55,7 @@ require_int() {
 
 for value in ${RPMS}; do require_int "RPMS" "${value}"; done
 require_int "REPEATS" "${REPEATS}"
+[ "${REPEATS}" -ge 1 ] || config_error "REPEATS must be at least 1"
 require_int "MAX_WAIT_MS" "${MAX_WAIT_MS}"
 require_int "POLL_MAX_MS" "${POLL_MAX_MS}"
 require_int "DRAIN_POLL_SECONDS" "${DRAIN_POLL_SECONDS}"
@@ -317,9 +318,11 @@ for rep in $(seq 1 "${REPEATS}"); do
 
   # 상한에 걸려도 숫자는 가져온다 — 천장 근처 회차의 거부 수치가 거기 있다.
   # 회차는 무효로 둔다(안 끝난 트랜잭션을 두고 센 값이라 낮다).
+  counts_failed=false
   if [ "${round_ok}" = true ]; then
     if ! counts="$(collect_counts)"; then
       counts="null"
+      counts_failed=true
       round_ok=false
     elif [ "$(echo "${counts}" | jq -r '.balanced')" != "true" ]; then
       round_ok=false
@@ -328,6 +331,8 @@ for rep in $(seq 1 "${REPEATS}"); do
     fi
   fi
 
+  # 지우기 전에 로그를 뺀다. 표에서 이상이 보이면 A 의 /var/log/bench/ 를 본다.
+  save_gateway_log "${run_id}" || true
   gateway_stop || true
 
   total_rounds=$(( total_rounds + 1 ))
@@ -346,13 +351,15 @@ for rep in $(seq 1 "${REPEATS}"); do
     --argjson valid "${round_ok}" \
     --argjson drain_capped "${drain_capped}" \
     --argjson drain_unreadable "${drain_unreadable}" \
+    --argjson counts_failed "${counts_failed}" \
     --argjson counts "${counts}" \
     '{config:$config, run_id:$run_id, mode:$mode, pool:$pool, rpm:$rpm,
       repeat:$rep, duration:$duration, duration_seconds:$duration_seconds,
       java_opts:$java_opts, spring_args:$spring_args, gateway_image:$image,
       k6_version:$k6_version, started_at:$started_at,
       valid:$valid, drain_capped:$drain_capped,
-      drain_unreadable:$drain_unreadable, counts:$counts}' \
+      drain_unreadable:$drain_unreadable, counts_failed:$counts_failed,
+      counts:$counts}' \
     > "${out_dir}/rep${rep}.manifest.json"
 
   echo "counts: ${counts}"
@@ -370,7 +377,7 @@ fi
 
 # 한 회차도 못 건졌으면 실패로 끝낸다. `bench.sh && parse.mjs` 가 빈 표를
 # 찍고 넘어가지 않게.
-if [ "${invalid_rounds}" -eq "${total_rounds}" ]; then
+if [ "${total_rounds}" -gt 0 ] && [ "${invalid_rounds}" -eq "${total_rounds}" ]; then
   echo "no usable rounds — check the gateway and the database on the A host" >&2
   exit 1
 fi

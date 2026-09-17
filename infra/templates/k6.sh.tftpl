@@ -82,11 +82,13 @@ sed -i \
 # repo_ref가 가리키는 브랜치에 bench.sh가 있어야 한다.
 git clone --depth 1 --branch "${repo_ref}" \
   https://github.com/roomdoor/fan-out-call.git /opt/fan-out-call
-if [ ! -f /opt/fan-out-call/perf/k6/bench.sh ]; then
-  echo "bench.sh not found on ref '${repo_ref}'. 측정 스크립트가 머지된 ref를 repo_ref로 지정할 것." >&2
-  exit 1
-fi
-chmod +x /opt/fan-out-call/perf/k6/bench.sh /opt/fan-out-call/perf/k6/smoke.sh
+for script in bench.sh smoke.sh; do
+  if [ ! -f "/opt/fan-out-call/perf/k6/$${script}" ]; then
+    echo "$${script} not found on ref '${repo_ref}'. 측정 스크립트가 머지된 ref를 repo_ref로 지정할 것." >&2
+    exit 1
+  fi
+  chmod +x "/opt/fan-out-call/perf/k6/$${script}"
+done
 
 # mock 샤드가 전부 응답하는지 확인한다. 하나라도 못 뜨면 준비 마커를 만들지 않는다.
 for i in $(seq 0 $(( ${shard_count} - 1 ))); do

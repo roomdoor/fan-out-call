@@ -38,6 +38,7 @@ const runs = walk(root).map((manifestPath) => {
     valid: m.valid === true,
     drainCapped: m.drain_capped === true,
     drainUnreadable: m.drain_unreadable === true,
+    countsFailed: m.counts_failed === true,
     mode: m.mode ?? '-',
     pool: m.pool ?? '-',
     rpm: m.rpm,
@@ -161,10 +162,14 @@ if (invalid.length > 0) {
   const unreadable = invalid.filter((r) => r.drainUnreadable).length;
   const capped = invalid.filter((r) => r.drainCapped && !r.drainUnreadable).length;
   const unbalanced = invalid.filter((r) => !r.balanced).length;
+  // 집계 쿼리가 실패한 회차. 안 갈라두면 "기동·k6 실패" 로 뭉뚱그려진다.
+  const countsFailed = invalid.filter((r) => r.countsFailed).length;
+  const rest = invalid.length - capped - unreadable - unbalanced - countsFailed;
   notes.push(
     `⚠️ 무효 회차 ${invalid.length}건 (표에서 제외). ` +
-      `드레인 상한 ${capped}건, DB를 못 읽음 ${unreadable}건, ` +
-      `집계 불일치 ${unbalanced}건, 나머지는 기동·k6 실패다.`,
+      `드레인 상한 ${capped}건, 드레인 중 DB 못 읽음 ${unreadable}건, ` +
+      `집계 쿼리 실패 ${countsFailed}건, 집계 불일치 ${unbalanced}건, ` +
+      `기동·k6 실패 ${rest}건.`,
   );
   if (unreadable > 0) {
     notes.push('⚠️ DB를 못 읽어 무효가 된 회차가 있다. 포화가 아니라 SSM·MySQL 문제다.');
@@ -205,7 +210,10 @@ if (submitErrors > 0) {
 // fan-out이 예외로 중단된 run. 부하 신호인 FAILED(포화)와 구분해서 센다.
 const failedErrors = sum(usable.map((r) => r.failedError));
 if (failedErrors > 0) {
-  notes.push(`⚠️ 예외로 중단된 run ${failedErrors}건. 천장이 아니라 코드·설정 문제다. A의 게이트웨이 로그를 볼 것.`);
+  notes.push(
+    `⚠️ 예외로 중단된 run ${failedErrors}건. 천장이 아니라 코드·설정 문제다. ` +
+      `A 의 /var/log/bench/<회차>.log 를 볼 것.`,
+  );
 }
 
 // 집계 단계에서 터진 run. fan-out 은 끝났으므로 DB 쪽 부하 증상이다.
