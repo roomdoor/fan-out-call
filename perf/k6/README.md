@@ -7,12 +7,13 @@ fan-out 모드별 처리 한계를 재는 k6 스위트다. AWS 3호스트에서 
 
 ```
 perf/k6/
-├── bench.sh           오케스트레이터. C(k6)에서 돌며 A(게이트웨이)를 SSM으로 제어
+├── smoke.sh           배포 직후 점검. 모드별 1건씩, 부하 없음
+├── bench.sh           측정 오케스트레이터. C(k6)에서 돌며 A를 SSM으로 제어
 ├── config/*.env       설정 하나 = pool 하나
 ├── parse.mjs          결과 -> 마크다운 표
-├── load.js            주력 시나리오 (constant-arrival-rate)
-├── smoke.js           배포 직후 확인용 1회 실행
-├── lib/               설정, 게이트웨이 폴링, 커스텀 지표
+├── load.js            측정 시나리오 (constant-arrival-rate)
+├── smoke.js           점검 시나리오 (모드당 1건)
+├── lib/               remote.sh(SSM·DB), 설정, 게이트웨이 폴링, 지표
 └── results/<config>/  회차별 summary.json + manifest.json
 ```
 
@@ -22,13 +23,25 @@ C 호스트에서:
 
 ```bash
 cd /opt/fan-out-call/perf/k6
-./bench.sh config/smoke.env && node parse.mjs results/smoke   # apply 직후 먼저
+./smoke.sh                       # apply 직후 먼저. 2~3분
 ./bench.sh config/v15-pool512.env
 node parse.mjs results/v15-pool512
 ```
 
 `BASE_URL`, `GATEWAY_INSTANCE_ID`, `AWS_REGION` 은 Terraform이
 `/etc/profile.d/bench.sh` 에 심어둔다.
+
+## 스모크
+
+`./smoke.sh` — 부하를 걸지 않는다. 모드마다 트랜잭션 1건씩 넣고 은행 50곳이
+호출되고 결과가 저장되는지만 본다. 게이트웨이는 한 번만 띄운다.
+
+통과 기준은 모드마다 셋이다 — `status` 가 `COMPLETED`, 저장된 은행콜이 50,
+성공이 1건 이상. 하나라도 어긋나면 `exit 1` 이다.
+
+제출은 `smoke.js` 를 k6 로 돌린다. 실측이 쓰는 `lib/` 를 그대로 타므로 k6
+설치, 시나리오 파싱, 게이트웨이 폴링까지 여기서 걸린다. `lib/remote.sh` 도
+`bench.sh` 와 같은 것을 쓰므로 SSM 권한과 DB 접근도 같이 확인된다.
 
 ## 무엇을 세나
 
