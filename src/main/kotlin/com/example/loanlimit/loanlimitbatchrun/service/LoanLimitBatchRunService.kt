@@ -124,11 +124,8 @@ class LoanLimitBatchRunService(
         const val FAIL_REASON_MAX = 500
 
         /**
-         * 컬럼이 500자라 긴 예외 메시지를 그냥 넣으면 저장이 통째로 실패하고,
-         * run이 FAILED로 표시조차 안 된다. 자르는 이유가 그것이다.
-         *
-         * 그냥 take(500)을 쓰면 서로게이트 쌍 가운데가 잘려 홀로 남을 수 있고,
-         * MySQL이 그 문자열을 거부해서 막으려던 결과가 그대로 난다.
+         * 컬럼을 넘기면 저장이 실패해 run 이 FAILED 로 표시조차 안 되므로 자른다.
+         * take() 만 쓰면 서로게이트 쌍이 갈려 MySQL 이 문자열을 거부한다.
          */
         fun truncateFailReason(reason: String): String {
             if (reason.length <= FAIL_REASON_MAX) return reason

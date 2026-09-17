@@ -1,16 +1,11 @@
 #!/bin/bash
-# 측정 오케스트레이터. C 호스트(k6)에서 돈다.
+# 측정 오케스트레이터. C 호스트(k6)에서 돌며 게이트웨이(A)를 SSM으로 조종한다.
 #
 #   ./bench.sh config/v15-pool512.env
 #   node parse.mjs results/v15-pool512
 #
-# 게이트웨이(A 호스트)는 SSM으로 조종한다. 설정 하나 = pool 하나다.
-# pool 여러 개를 한 번에 돌리지 않는다 — 앞 pool의 천장을 보고 다음 pool의
-# RPM 범위를 정하는 편이, 스크립트가 실행 중에 천장을 판정하는 것보다 낫다.
-#
-# 숫자는 게이트웨이 로그가 아니라 DB에서 센다. 로그 문자열을 세면 완료
-# 여부를 "개수가 안 변한다"로 추측해야 하는데, 그 추측이 SSM 장애와
-# 구분되지 않는다. DB는 status='IN_PROGRESS' 가 0이면 끝난 것이다.
+# 설정 하나 = pool 하나. 숫자는 게이트웨이 DB에서 센다.
+# 배경은 DECISIONS.md 참조.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -48,9 +43,6 @@ MYSQL_DATABASE="${MYSQL_DATABASE:-loan_limit_gateway}"
 
 # ---------------------------------------------------------------------------
 # 설정 검증 — EC2 시간을 쓰기 전에 전부 본다.
-#
-# 예전에는 검증이 흩어져 있어서 DURATION 오타 하나가 첫 회차를 다 돌린 뒤
-# 산술 오류로 터졌다. 20분 버리고 알게 되는 종류다.
 # ---------------------------------------------------------------------------
 
 config_error() { echo "config error: $*" >&2; exit 1; }
@@ -71,8 +63,7 @@ require_int "DRAIN_POLL_SECONDS" "${DRAIN_POLL_SECONDS}"
 require_int "QUEUE" "${QUEUE}"
 [ -n "${POOL}" ] && require_int "POOL" "${POOL}"
 
-# k6는 "1m30s" 도 받지만 여기서는 안 받는다. 기대 트랜잭션 수를 세야 하므로
-# 초로 정확히 바꿀 수 있는 형태만 통과시킨다.
+# "1m30s" 는 안 받는다. 초로 정확히 바꿀 수 있는 형태만 통과시킨다.
 case "${DURATION}" in
   *[0-9]s) DURATION_UNIT=1 ;;
   *[0-9]m) DURATION_UNIT=60 ;;
@@ -85,16 +76,14 @@ case "${DURATION_VALUE}" in
 esac
 DURATION_SECONDS=$(( DURATION_VALUE * DURATION_UNIT ))
 
-# sequential은 bad-case 시연용이라 측정하지 않는다. 트랜잭션 하나가 9분
-# (48x10s + 2x30s)이라 회차 안에 끝나지 않는다. 아래 루프와 같은 방식으로
-# 쪼개서 본다 — 공백만 보면 여러 줄로 쓴 MODES가 빠져나간다.
+# sequential 은 측정하지 않는다(트랜잭션 하나가 9분이라 회차 안에 안 끝난다).
+# 아래 측정 루프와 같은 방식으로 쪼개야 여러 줄로 쓴 MODES 도 걸린다.
 for mode in ${MODES}; do
   [ "${mode}" = "sequential" ] && config_error "sequential is not measured (see README.md)"
 done
 
-# pool 설정은 async-threadpool 모드만 읽는다. 다른 모드 회차에까지 붙이면
-# manifest에 그 모드가 가진 적 없는 조건이 기록되고, 표에서도 그 pool 아래
-# 묶인다. manifest는 실제 측정 조건을 남기는 파일이라 그러면 안 된다.
+# pool 설정은 async-threadpool 모드만 읽는다. 다른 모드에 붙이면 manifest 에
+# 그 모드가 갖지 않은 조건이 기록된다.
 pool_label_for() {
   if [ -n "${POOL}" ] && [ "$1" = "async-threadpool" ]; then
     echo "pool${POOL}-q${QUEUE}"
@@ -119,10 +108,7 @@ mkdir -p "${RESULTS_ROOT}"
 DRAIN_CAP_SECONDS=$(( MAX_WAIT_MS / 1000 + 60 ))
 
 # ---------------------------------------------------------------------------
-# 원격 호출
-#
-# 전부 0/1 을 돌려주고, 부르는 쪽이 판단한다. 여기서 스크립트를 죽이지
-# 않는다 — SSM 한 번 삐끗했다고 몇 시간짜리 측정을 잃을 이유가 없다.
+# 원격 호출 — 전부 0/1 을 돌려주고, 부르는 쪽이 판단한다.
 # ---------------------------------------------------------------------------
 
 ssm_run() {
@@ -163,10 +149,8 @@ ssm_run() {
     --query 'StandardOutputContent' --output text 2>/dev/null
 }
 
-# 비밀번호는 컨테이너 env 안에만 있다. 여기로도 SSM 명령문으로도 안 나온다.
-#
-# SQL은 base64로 넘긴다. 그냥 끼워 넣으면 'COMPLETED' 같은 작은따옴표가
-# sh -c '...' 를 중간에 끊는다. base64 출력에는 따옴표도 공백도 없다.
+# 비밀번호는 컨테이너 env 안에만 있다. SQL 은 base64 로 넘긴다 — 그냥 끼우면
+# 'COMPLETED' 의 작은따옴표가 sh -c '...' 를 끊는다.
 db_query() {
   local encoded
   encoded="$(printf '%s' "$1" | base64 | tr -d '\n')" || return 1
@@ -180,9 +164,8 @@ gateway_start() {
   ssm_run "JAVA_TOOL_OPTIONS='${JAVA_OPTS}' /usr/local/bin/gateway-run.sh $1 ${EXTRA_ARGS}" >/dev/null
 }
 
-# 회차 사이에 DB를 비운다. 게이트웨이 재시작은 MySQL을 건드리지 않고
-# ddl-auto도 validate라 스키마가 다시 만들어지지 않는다. 안 비우면 회차2가
-# 회차1의 행까지 센다. 외래키 때문에 TRUNCATE 전에 체크를 끈다.
+# 회차 사이에 DB 를 비운다. 게이트웨이 재시작은 MySQL 을 건드리지 않으므로
+# 안 비우면 지난 회차 행까지 세진다. 외래키 때문에 체크를 끄고 TRUNCATE 한다.
 db_reset() {
   db_query "SET FOREIGN_KEY_CHECKS=0; TRUNCATE TABLE bank_call_result; TRUNCATE TABLE loan_limit_batch_run; SET FOREIGN_KEY_CHECKS=1;" >/dev/null
 }
@@ -196,24 +179,22 @@ resolve_digest() {
 # 회차
 # ---------------------------------------------------------------------------
 
-# 진행 중인 트랜잭션이 0이 될 때까지 기다린다. 추측이 아니라 사실이다.
-#
-# "아직 안 끝났다"와 "못 읽었다"를 구분한다. 둘을 같게 다루면 SSM 장애가
-# 포화로 라벨링되는데, 그게 이 재작성이 없애려던 혼동이다.
+# 진행 중인 트랜잭션이 0이 될 때까지 기다린다.
+# "아직 안 끝났다"와 "못 읽었다"를 구분한다 — 합치면 SSM 장애가 포화로 보인다.
 DRAIN_UNREADABLE=false
 drain_wait() {
-  local started="${SECONDS}" elapsed=0 remaining reads=0 failures=0
+  local started="${SECONDS}" elapsed=0 remaining last_good="" consecutive_failures=0
 
   DRAIN_UNREADABLE=false
   while :; do
     remaining="$(db_query "SELECT COUNT(*) FROM loan_limit_batch_run WHERE status='IN_PROGRESS';")" || remaining=""
     case "${remaining}" in
-      ''|*[!0-9]*) failures=$(( failures + 1 )) ;;
+      ''|*[!0-9]*) consecutive_failures=$(( consecutive_failures + 1 )) ;;
       0)
         echo "drained after $(( SECONDS - started ))s"
         return 0
         ;;
-      *) reads=$(( reads + 1 )) ;;
+      *) consecutive_failures=0; last_good="${remaining}" ;;
     esac
 
     # SSM 왕복에도 시간이 걸리므로 sleep 횟수가 아니라 벽시계로 센다.
@@ -222,12 +203,13 @@ drain_wait() {
     sleep "${DRAIN_POLL_SECONDS}"
   done
 
-  if [ "${reads}" -eq 0 ]; then
-    # 한 번도 숫자를 못 읽었다. 포화가 아니라 DB나 SSM 문제다.
+  # 기준은 "상한에 닿는 순간 읽고 있었나"다. 누적 성공 횟수로 보면 첫 폴링만
+  # 성공해도 읽을 수 있었던 것이 된다.
+  if [ "${consecutive_failures}" -gt 0 ]; then
     DRAIN_UNREADABLE=true
-    echo "drain could not read the database for ${DRAIN_CAP_SECONDS}s (${failures} failed reads)" >&2
+    echo "drain could not read the database for the last ${consecutive_failures} polls (last known in progress: ${last_good:-unknown})" >&2
   else
-    echo "drain hit the ${DRAIN_CAP_SECONDS}s cap (still in progress: ${remaining:-unknown})" >&2
+    echo "drain hit the ${DRAIN_CAP_SECONDS}s cap (still in progress: ${remaining})" >&2
   fi
   return 1
 }
@@ -236,8 +218,14 @@ COUNT_SQL="SELECT
  (SELECT COUNT(*) FROM loan_limit_batch_run WHERE status='COMPLETED'),
  (SELECT COUNT(*) FROM loan_limit_batch_run WHERE status='PARTIAL_FAILURE'),
  (SELECT COUNT(*) FROM loan_limit_batch_run WHERE status='FAILED' AND fail_reason IS NULL),
- (SELECT COUNT(*) FROM loan_limit_batch_run WHERE status='FAILED' AND fail_reason IS NOT NULL),
+ (SELECT COUNT(*) FROM loan_limit_batch_run WHERE status='FAILED' AND fail_reason IS NOT NULL AND fail_reason NOT LIKE 'FINALIZE_FAILED:%'),
+ -- 집계 단계에서 터진 run. fan-out 은 끝났으므로 코드 문제가 아니라
+ -- 부하 증상이다. 섞으면 포화가 코드 문제로 보고된다.
+ (SELECT COUNT(*) FROM loan_limit_batch_run WHERE status='FAILED' AND fail_reason LIKE 'FINALIZE_FAILED:%'),
  (SELECT COUNT(*) FROM loan_limit_batch_run WHERE status='IN_PROGRESS'),
+ -- 상태별 합과 비교할 전체 run 수. 이 비교가 실제로 깨질 수 있는 검사다 -
+ -- RunStatus 에 값이 하나 늘면 그 run 들이 어느 칸에도 안 잡힌다.
+ (SELECT COUNT(*) FROM loan_limit_batch_run),
  (SELECT COUNT(*) FROM bank_call_result WHERE success=1),
  (SELECT COUNT(*) FROM bank_call_result WHERE success=0 AND response_code='REJECTED'),
  (SELECT COUNT(*) FROM bank_call_result WHERE success=0 AND response_code='SUBMIT_ERROR'),
@@ -248,9 +236,11 @@ COUNT_SQL="SELECT
  -- 저장 실패로도 세어져 경고가 두 번 뜬다.
  (SELECT COUNT(*) FROM loan_limit_batch_run r WHERE r.fail_reason IS NULL AND (SELECT COUNT(*) FROM bank_call_result b WHERE b.run_id=r.id) < r.requested_bank_count);"
 
-# 숫자 12개를 받아 JSON으로 만든다. 다섯 버킷의 합이 전체 행 수와 같은지
-# 여기서 확인한다 — 예전에 어느 카운터에도 안 잡히는 상태가 생겨서 run이
-# 통째로 집계에서 빠진 적이 있다. 합이 맞으면 그런 누락이 불가능하다.
+# 숫자 14개를 받아 JSON 으로 만든다.
+#
+# 합 검사는 run 상태에만 건다. RunStatus 에 값이 늘면 그 run 들이 어느 칸에도
+# 안 잡히고 사라지는데, 이 비교가 그걸 잡는다. 은행 호출 쪽은 마지막 버킷이
+# 캐치올이라 합이 항상 맞아서 검사할 게 없다.
 collect_counts() {
   local row
   row="$(db_query "${COUNT_SQL}")" || return 1
@@ -259,7 +249,7 @@ collect_counts() {
   # shellcheck disable=SC2086
   set -- ${row}
   fields=$#
-  [ "${fields}" -eq 12 ] || { echo "expected 12 counts, got ${fields}: ${row}" >&2; return 1; }
+  [ "${fields}" -eq 14 ] || { echo "expected 14 counts, got ${fields}: ${row}" >&2; return 1; }
 
   local n
   for n in "$@"; do
@@ -268,25 +258,27 @@ collect_counts() {
     esac
   done
 
-  local bucket_sum=$(( $6 + $7 + $8 + $9 + ${10} ))
+  local status_sum=$(( $1 + $2 + $3 + $4 + $5 + $6 ))
   local balanced=true
-  if [ "${bucket_sum}" -ne "${11}" ]; then
+  if [ "${status_sum}" -ne "$7" ]; then
     balanced=false
-    echo "bucket sum ${bucket_sum} != bank_call_result rows ${11}" >&2
+    echo "run status sum ${status_sum} != loan_limit_batch_run rows $7" >&2
   fi
 
   jq -n \
     --argjson completed "$1" --argjson partial "$2" \
     --argjson failed_saturated "$3" --argjson failed_error "$4" \
-    --argjson in_progress "$5" \
-    --argjson calls_success "$6" --argjson calls_rejected "$7" \
-    --argjson calls_submit_error "$8" --argjson calls_exception "$9" \
-    --argjson calls_other "${10}" --argjson calls_total "${11}" \
-    --argjson runs_missing_rows "${12}" \
+    --argjson failed_finalize "$5" --argjson in_progress "$6" \
+    --argjson runs_total "$7" \
+    --argjson calls_success "$8" --argjson calls_rejected "$9" \
+    --argjson calls_submit_error "${10}" --argjson calls_exception "${11}" \
+    --argjson calls_other "${12}" --argjson calls_total "${13}" \
+    --argjson runs_missing_rows "${14}" \
     --argjson balanced "${balanced}" \
     '{completed:$completed, partial:$partial,
       failed_saturated:$failed_saturated, failed_error:$failed_error,
-      in_progress:$in_progress,
+      failed_finalize:$failed_finalize, in_progress:$in_progress,
+      runs_total:$runs_total,
       calls_success:$calls_success, calls_rejected:$calls_rejected,
       calls_submit_error:$calls_submit_error, calls_exception:$calls_exception,
       calls_other:$calls_other, calls_total:$calls_total,
@@ -325,18 +317,16 @@ for rep in $(seq 1 "${REPEATS}"); do
   echo "  ${CONFIG_NAME} / ${run_id}"
   echo "=============================================================="
 
-  # 이 회차가 쓸 만한 숫자를 냈는지 여기 하나로 판단한다. 어느 단계가
-  # 실패하든 결과는 같다 — 이 회차만 버리고 다음으로 간다.
+  # 이 회차가 쓸 만한 숫자를 냈는지 여기 하나로 판단한다.
+  # 어느 단계가 실패하든 이 회차만 버리고 다음으로 간다.
   round_ok=true
   drain_capped=false
   counts="null"
 
   gateway_stop || true
 
-  # 게이트웨이를 먼저 띄운다. 부트스트랩은 MySQL과 mock만 준비하고 게이트웨이는
-  # 안 띄우므로, apply 직후 DB에는 스키마조차 없다(Flyway가 게이트웨이 기동 때
-  # 돈다). 비우기를 앞에 두면 없는 테이블을 TRUNCATE 하다 실패하고, 그 실패
-  # 때문에 게이트웨이를 안 띄워서 다음 회차도 똑같이 죽는다.
+  # 순서를 바꾸지 말 것. apply 직후 DB 에는 스키마가 없고, Flyway 는 게이트웨이
+  # 기동 때 돈다. 비우기가 앞에 오면 첫 회차가 없는 테이블에서 막힌다.
   if ! gateway_start "${pool_args}"; then
     echo "gateway failed to start, skipping ${run_id}" >&2
     round_ok=false
@@ -366,22 +356,19 @@ for rep in $(seq 1 "${REPEATS}"); do
       RUN_ID="${CONFIG_NAME}-${MODE}-${pool_label}-rpm${rpm}-rep${rep}" \
       k6 run --summary-export="${summary_file}" load.js ) || k6_status=$?
 
-    # 99는 threshold 위반이다. 부하는 정상적으로 다 걸렸다는 뜻이라 회차를
-    # 버리면 안 된다 — threshold는 천장에서 깨지므로 제일 중요한 회차가
-    # 통째로 사라진다. 지금 load.js에는 threshold가 없지만, 나중에 추가될 때
-    # 조용히 그렇게 되는 걸 막는다.
+    # 99 = threshold 위반. 부하는 다 걸린 것이라 회차를 버리지 않는다
+    # (threshold 는 천장에서 깨지므로 제일 중요한 회차가 사라진다).
     if [ "${k6_status}" -eq 99 ]; then
       echo "k6 threshold breached for ${run_id} (load was applied; keeping the round)" >&2
     elif [ "${k6_status}" -ne 0 ]; then
-      # k6가 죽으면 DB는 0을 돌려준다. 정상적으로 0인 것과 구분이 안 되므로
-      # 여기서 무효로 표시해야 한다.
+      # k6 가 죽어도 DB 는 0 을 돌려준다. 정상 0 과 구분되지 않으므로 무효 처리.
       echo "k6 exited ${k6_status} for ${run_id}" >&2
       round_ok=false
     fi
   fi
 
-  # k6는 DURATION에서 멈추지만 트랜잭션 e2e 하한이 31초다. 막바지에 넣은
-  # 것들이 아직 돌고 있으므로 끝날 때까지 기다린 뒤에 센다.
+  # k6 는 DURATION 에서 멈추지만 트랜잭션 e2e 하한이 31초다. 막바지에 넣은
+  # 것들이 아직 돌고 있으므로 기다린 뒤에 센다.
   drained=false
   drain_unreadable=false
   if [ "${round_ok}" = true ]; then
@@ -393,9 +380,8 @@ for rep in $(seq 1 "${REPEATS}"); do
     fi
   fi
 
-  # 드레인이 상한에 걸려도 숫자는 가져온다. 상한은 천장 근처에서 걸리는데
-  # 그게 제일 보고 싶은 회차다. 버리면 표에 천장 아래 점만 남는다.
-  # 회차는 여전히 무효다 — 안 끝난 트랜잭션을 두고 센 값이라 낮게 나온다.
+  # 상한에 걸려도 숫자는 가져온다 — 천장 근처 회차의 거부 수치가 거기 있다.
+  # 회차는 무효로 둔다(안 끝난 트랜잭션을 두고 센 값이라 낮다).
   if [ "${round_ok}" = true ]; then
     if ! counts="$(collect_counts)"; then
       counts="null"
@@ -447,9 +433,8 @@ if [ "${invalid_rounds}" -gt 0 ]; then
   echo "${invalid_rounds}/${total_rounds} round(s) produced no usable numbers; marked valid=false" >&2
 fi
 
-# 한 회차도 못 건졌으면 실패로 끝낸다. 0으로 끝내면
-# `./bench.sh ... && node parse.mjs ...` 가 그대로 넘어가 빈 표를 찍고,
-# 완전히 망가진 상태가 정상 실행처럼 보인다.
+# 한 회차도 못 건졌으면 실패로 끝낸다. `bench.sh && parse.mjs` 가 빈 표를
+# 찍고 넘어가지 않게.
 if [ "${invalid_rounds}" -eq "${total_rounds}" ]; then
   echo "no usable rounds — check the gateway and the database on the A host" >&2
   exit 1

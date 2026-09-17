@@ -130,7 +130,16 @@ class LoanLimitQueryOrchestrator(
                 )
             }
 
-            loanLimitBatchRunService.finalizeRunStatus(runId)
+            // 집계는 따로 가둔다. 여기서 터지는 건(커넥션 풀 고갈, 락 대기)
+            // fan-out 코드 문제가 아니라 부하 증상이라 따로 기록해야 한다.
+            try {
+                loanLimitBatchRunService.finalizeRunStatus(runId)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                log.error("Run status finalization failed", e)
+                loanLimitBatchRunService.markRunFailed(runId, "$FINALIZE_FAILED_PREFIX${e.message}")
+            }
         } catch (e: CancellationException) {
             // 아래 catch(Exception)이 이걸 잡아버린다(IllegalStateException 상속).
             // 그러면 취소된 코루틴에서 markRunFailed가 블로킹 JPA를 돌린다.
@@ -143,6 +152,12 @@ class LoanLimitQueryOrchestrator(
 
     companion object {
         private val log = LoggerFactory.getLogger(LoanLimitQueryOrchestrator::class.java)
+
+        /**
+         * 집계 단계에서 터진 run 을 fan-out 이 터진 run 과 구분하는 표시.
+         * 측정 스크립트가 fail_reason 으로 이 둘을 갈라 센다.
+         */
+        const val FINALIZE_FAILED_PREFIX = "FINALIZE_FAILED: "
     }
 
 }
