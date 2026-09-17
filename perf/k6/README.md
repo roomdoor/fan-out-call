@@ -8,7 +8,7 @@ fan-out 모드별 처리 한계를 재는 k6 스위트다. AWS 3호스트에서 
 ```
 perf/k6/
 ├── bench.sh           오케스트레이터. C(k6)에서 돌며 A(게이트웨이)를 SSM으로 제어
-├── config/*.env       측정 세대 하나 = 파일 하나
+├── config/*.env       설정 하나 = pool 하나
 ├── parse.mjs          결과 -> 마크다운 표
 ├── load.js            주력 시나리오 (constant-arrival-rate)
 ├── smoke.js           배포 직후 확인용 1회 실행
@@ -25,91 +25,127 @@ C 호스트에서:
 
 ```bash
 cd /opt/fan-out-call/perf/k6
-./bench.sh config/v15-baseline.env
-node parse.mjs results/v15-baseline
+./bench.sh config/smoke.env && node parse.mjs results/smoke   # apply 직후 먼저
+./bench.sh config/v15-pool512.env
+node parse.mjs results/v15-pool512
 ```
 
 `BASE_URL`, `GATEWAY_INSTANCE_ID`, `AWS_REGION` 은 Terraform이
 `/etc/profile.d/bench.sh` 에 심어둔다. 따로 넣을 필요 없다.
 
-## 세대 추가
+## 숫자는 DB에서 센다
 
-`config/` 에 `.env` 하나 만들면 된다. 스크립트는 안 고친다.
+k6 지표로는 실효 처리율을 못 잰다. 풀에서 거부된 트랜잭션도 빠른 `202` 를
+받으므로 k6에는 성공으로 보인다.
+
+그래서 게이트웨이가 남긴 DB 행을 센다. 예전에는 로그 문자열을 셌는데,
+완료 여부를 "로그 개수가 안 변한다"로 추측해야 했고 그 추측이 SSM 장애와
+구분되지 않았다.
+
+**은행 호출은 다섯 갈래로 나눈다.** `bank_call_result` 한 행이 은행 호출 하나다.
+
+| 버킷 | 조건 | 뜻 |
+| --- | --- | --- |
+| 성공 | `success = 1` | 한도를 받아왔다 |
+| 거부 | `response_code = 'REJECTED'` | 풀 포화. **천장 신호** |
+| 제출 실패 | `response_code = 'SUBMIT_ERROR'` | 설정·코드 문제. 부하와 무관 |
+| 예외 | `response_code = 'EXCEPTION'` | 타임아웃·연결 실패 |
+| 나머지 | 위 셋이 아닌 실패 | mock이 준 에러(`E503` 등) |
+
+`response_code` 는 게이트웨이 값(`REJECTED` 등)과 mock이 준 값(`S000`,
+`E503`)이 섞인 컬럼이라 성공 판정에 쓰면 안 된다. 성공은 게이트웨이가
+직접 계산하는 `success` 컬럼으로 본다.
+
+**다섯 버킷의 합이 전체 행 수와 같아야 한다.** `bench.sh` 가 회차마다
+확인하고, 다르면 그 회차를 무효로 표시한다. 예전에 어느 카운터에도 안
+잡히는 상태가 생겨 run이 통째로 집계에서 빠진 적이 있는데, 합을 맞추면
+그런 누락이 불가능하다.
+
+**트랜잭션 상태는 네 갈래다.**
+
+| 상태 | 뜻 |
+| --- | --- |
+| `COMPLETED` | 은행 50곳 전부 성공 |
+| `PARTIAL_FAILURE` | 일부만 성공 |
+| `FAILED` + `fail_reason` 없음 | 다 호출했는데 성공 0. **부하 신호** |
+| `FAILED` + `fail_reason` 있음 | fan-out 자체가 예외로 중단. **코드·설정 문제** |
+
+`fail_reason` 이 없으면 뒤의 둘이 구분되지 않아 버그가 천장처럼 보인다.
+
+## 드레인
+
+k6는 `DURATION` 에서 멈추지만 트랜잭션 하나의 e2e 하한이 31초다
+(은행 50곳 중 2곳이 30초). 막바지에 넣은 건들이 아직 돌고 있으므로
+끝날 때까지 기다린 뒤에 센다.
+
+기다림이 짧으면 안 끝난 게 빠져서 처리량이 낮게 나오고, 부하가 셀수록
+많이 빠지므로 **천장이 실제보다 낮아 보인다.**
+
+판정은 추측이 아니다 — `status='IN_PROGRESS'` 가 0이면 끝이다.
+`MAX_WAIT_MS + 60초` 안에 0이 안 되면 그 회차는 무효로 남긴다.
+
+## 회차가 실패해도 그 회차만 버린다
+
+기동 실패, k6 비정상 종료, DB 쿼리 실패, 드레인 상한 초과, 버킷 합
+불일치 — 어느 쪽이든 결과는 같다. 그 회차 manifest에 `valid: false` 를
+남기고 다음 회차로 간다. `parse.mjs` 는 무효 회차를 표에서 빼고 몇 건인지
+따로 적는다.
+
+스크립트가 실행 중에 "천장이다"라고 판단해서 남은 회차를 건너뛰지 않는다.
+그 판단은 사람이 표를 보고 한다.
+
+## pool 스윕은 하나씩 끊어서
+
+설정 하나에 pool 하나만 넣는다. 4종을 한 번에 던지지 않는다.
+
+```
+pool 512 → 표 확인 → 실제 천장으로 다음 pool 의 RPM 결정 → pool 1024 → ...
+```
+
+`RPM ≈ pool / 9` 는 계산값이다. 512에서 실제로 40이 나오면 공식이 틀린
+것이고, 4종을 한꺼번에 돌렸으면 60회차를 통째로 버린다. 첫 판이 눈금을
+맞춰준다.
+
+pool마다 천장 아래 한 점, 위 한 점이면 천장이 잡힌다. 반복 3회 기준으로
+pool 하나에 6회차, 약 45분이다.
+
+## 설정 만들기
+
+`config/` 에 `.env` 하나. 스크립트는 안 고친다.
 
 ```bash
-MODE=coroutine              # coroutine | async-threadpool | webclient | sequential
-RPMS="100 200 400 600"
-POOLS=default               # 또는 "512:200 1024:200" (pool:queue)
+MODE=async-threadpool        # 또는 MODES="coroutine webclient" (여러 모드)
+POOL=512                     # 빼면 애플리케이션 기본값
+QUEUE=200
+RPMS="30 60"
 REPEATS=3
-DURATION=4m
+DURATION=4m                  # 90s, 4m, 1h 형태만. "1m30s" 는 거부된다
 MAX_WAIT_MS=180000
 JAVA_OPTS="-Dkotlinx.coroutines.io.parallelism=512"
 EXTRA_ARGS="--server.tomcat.threads.max=200"
 ```
 
-`POOLS` 는 `async-threadpool` 모드에서만 의미가 있다. 다른 모드는
-`default` 로 두면 pool 인자를 넘기지 않는다.
+값이 숫자가 아니거나 `DURATION` 형식이 틀리면 **EC2 시간을 쓰기 전에**
+거부한다. `sequential` 은 bad-case 시연용이라 측정하지 않는다 —
+트랜잭션 하나가 9분이라 회차 안에 끝나지 않는다.
+
+`POOL` 을 `EXTRA_ARGS` 로도 줄 수 있지만 그러면 같은 옵션이 두 번 들어가
+Spring이 값을 합치고 기동이 실패한다. 둘 중 하나만 쓴다.
+
+## 결과 디렉터리를 재사용할 때
+
+`results/<config>/` 에 지난 실행 결과가 남아 있으면 `parse.mjs` 가 같이
+읽는다. 같은 설정 이름을 다시 쓸 거면 먼저 지운다.
 
 ## 왜 manifest.json인가
 
 회차마다 조건 전체를 결과 옆에 남긴다 — 이미지 **다이제스트**, JVM 플래그,
-Spring 인자, mock 프로파일, duration.
+Spring 인자, duration, k6 버전.
 
 이 프로젝트가 결과를 두 번 통째로 버린 이유가 조건 추적 실패였다.
 v6은 공유 WebClient 수정 전 측정인 줄 몰랐고, v13은 시작 시점의 jar가
 최신 커밋보다 오래된 것을 도중에 알아챘다. 태그가 아니라 다이제스트를
 기록하면 `latest` 가 가리키는 대상이 바뀌어도 어느 빌드였는지가 남는다.
-
-`parse.mjs` 는 한 표 안에 이미지나 JVM 플래그가 섞이면 경고를 낸다.
-pool 512/1024 회차가 `io.parallelism` 기본값 차이로 교란됐던 것이
-그 경고가 잡으려는 상황이다.
-
-## 실효 처리율은 k6 지표로 못 센다
-
-풀에서 거부된 트랜잭션도 빠른 `202` 를 받으므로 k6에는 성공으로 보인다.
-그래서 게이트웨이 로그를 직접 센다.
-
-| 로그 패턴 | 의미 |
-| --- | --- |
-| `Background fan-out completed ... status=COMPLETED` | 50/50 전부 성공 |
-| `Background fan-out completed ... status=PARTIAL_FAILURE` | 일부 은행만 성공 |
-| `Background fan-out completed ... status=FAILED` | fan-out은 끝났으나 성공한 은행이 0 (전 은행 거부 등) |
-| `Run marked as FAILED` | fan-out 자체가 예외로 중단됨 |
-| `Bank call submission rejected bankCode=` | 풀이 그 은행 호출을 거부 (부하 신호) |
-| `Bank call submission failed bankCode=` | 제출 단계 실패 — 설정·코드 문제, 부하와 무관 |
-| `Result persistence failed bankCode=` | 그 은행 결과를 DB에 저장 실패 |
-
-**저장 실패는 run 상태에 반영되지 않는다.** `finalizeRunStatus` 는 저장된 행만 세고
-요청한 은행 수와 비교하지 않으므로, 50개 중 47개만 저장돼도 남은 행이 전부 성공이면
-`COMPLETED` 다. 부분 성공을 따로 구분하지 않기로 한 결정이다. 그래서 저장 실패가
-있었던 회차는 **실효 처리율이 실제보다 높게** 나오며, `parse.mjs` 의 경고가 그것을
-알리는 유일한 신호다.
-
-앞의 세 `status=` 행이 서로 배타적이고 합이 run 수와 같다. `Run marked as FAILED`는
-그 앞 단계에서 터진 경우라 별도로 센다.
-
-**거부와 저장 실패는 은행 단위로 집계한다.** 은행 하나가 막혀도 나머지는 계속
-호출되고 기록된다. 실패 종류에 따라 막는 자리가 다르다.
-
-- 저장 실패 — `LoanLimitQueryOrchestrator` 가 `onEachResult` 를 감싼다. 정의되는
-  곳이 한 곳뿐이라 네 모드가 자동으로 같은 정책을 쓴다
-- 제출 실패(알 수 없는 은행 코드, 직렬화 오류) — 모드마다 구조가 달라 각
-  executor가 맡는다. coroutine·sequential은 `try` 범위, webclient는 `Mono.defer`,
-  async-threadpool은 `RejectedExecutionException` 분류
-- 풀 거부 — async-threadpool에만 해당. `REJECTED` 로 기록
-
-측정 부작용 하나. 거부된 은행도 결과 행을 남기므로, 예전에 첫 거부에서 run이
-중단되던 때보다 **포화 지점에서 DB 쓰기가 늘어난다.** 천장 근처에서 DB로 부하가
-옮겨가 관측되는 천장 자체가 움직일 수 있다.
-
-그래서 **v1~v14의 FAILED 수치와 직접 비교할 수 없다.** 그때는 은행 하나만
-거부돼도 run 전체가 FAILED였고 보고서들이 그것을 "fail-fast"로 해석했다.
-지금은 통과한 은행이 있으면 `PARTIAL_FAILURE` 가 되고, 막힌 은행 수가
-`REJECTED` 행으로 남는다. 몇 개가 막혔는지 알 수 있어 더 정확하지만
-기준이 달라졌다. v15가 새 기준선인 이유 중 하나다.
-
-SSM stdout이 24,000자에서 잘리므로 로그 원본은 가져오지 않는다. A에서
-세고 숫자만 받는다. 원본은 A의 `/var/log/bench/` 에 남는다.
 
 ## 환경변수 (시나리오)
 

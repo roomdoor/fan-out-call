@@ -88,6 +88,9 @@ class LoanLimitBatchRunService(
         runEntity.successCount = successCount
         runEntity.failureCount = failureCount
         runEntity.status = RunStatus.FAILED
+        // 컬럼이 500자라 그냥 넣으면 예외 메시지가 길 때 저장이 통째로 실패한다.
+        // 그러면 run이 FAILED로 표시조차 안 되므로 자른다.
+        runEntity.failReason = (reason ?: "unknown").take(FAIL_REASON_MAX)
         runEntity.finishedAt = LocalDateTime.now()
         batchRunRepository.save(runEntity)
 
@@ -118,5 +121,8 @@ class LoanLimitBatchRunService(
 
     companion object {
         private val log = LoggerFactory.getLogger(LoanLimitBatchRunService::class.java)
+
+        // loan_limit_batch_run.fail_reason 컬럼 길이
+        const val FAIL_REASON_MAX = 500
     }
 }

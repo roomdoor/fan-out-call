@@ -36,6 +36,14 @@ class LoanLimitBatchRun(
     @Column(name = "status", nullable = false, length = 32)
     var status: RunStatus = RunStatus.IN_PROGRESS,
 
+    /**
+     * fan-out 자체가 예외로 중단된 경우에만 채워진다. 은행을 다 호출하고
+     * 성공이 0이어서 FAILED가 된 경우는 null이다. 둘 다 status는 FAILED라
+     * 이 컬럼이 없으면 코드 문제와 부하 신호가 구분되지 않는다.
+     */
+    @Column(name = "fail_reason", length = 500)
+    var failReason: String? = null,
+
     @Column(name = "started_at", nullable = false)
     var startedAt: LocalDateTime = LocalDateTime.now(),
 
