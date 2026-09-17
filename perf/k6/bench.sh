@@ -66,6 +66,8 @@ require_int "REPEATS" "${REPEATS}"
 require_int "MAX_WAIT_MS" "${MAX_WAIT_MS}"
 require_int "POLL_MAX_MS" "${POLL_MAX_MS}"
 require_int "DRAIN_POLL_SECONDS" "${DRAIN_POLL_SECONDS}"
+# 0이면 드레인 루프가 쉬지 않고 SSM을 때린다.
+[ "${DRAIN_POLL_SECONDS}" -ge 1 ] || config_error "DRAIN_POLL_SECONDS must be at least 1"
 require_int "QUEUE" "${QUEUE}"
 [ -n "${POOL}" ] && require_int "POOL" "${POOL}"
 
@@ -90,15 +92,22 @@ for mode in ${MODES}; do
   [ "${mode}" = "sequential" ] && config_error "sequential is not measured (see README.md)"
 done
 
-if [ -n "${POOL}" ]; then
-  POOL_LABEL="pool${POOL}-q${QUEUE}"
-  POOL_ARGS="--app.async-thread-pool.core-pool-size=${POOL}"
-  POOL_ARGS="${POOL_ARGS} --app.async-thread-pool.max-pool-size=${POOL}"
-  POOL_ARGS="${POOL_ARGS} --app.async-thread-pool.queue-capacity=${QUEUE}"
-else
-  POOL_LABEL="default"
-  POOL_ARGS=""
-fi
+# pool 설정은 async-threadpool 모드만 읽는다. 다른 모드 회차에까지 붙이면
+# manifest에 그 모드가 가진 적 없는 조건이 기록되고, 표에서도 그 pool 아래
+# 묶인다. manifest는 실제 측정 조건을 남기는 파일이라 그러면 안 된다.
+pool_label_for() {
+  if [ -n "${POOL}" ] && [ "$1" = "async-threadpool" ]; then
+    echo "pool${POOL}-q${QUEUE}"
+  else
+    echo "default"
+  fi
+}
+
+pool_args_for() {
+  if [ -n "${POOL}" ] && [ "$1" = "async-threadpool" ]; then
+    echo "--app.async-thread-pool.core-pool-size=${POOL} --app.async-thread-pool.max-pool-size=${POOL} --app.async-thread-pool.queue-capacity=${QUEUE}"
+  fi
+}
 
 K6_VERSION="$(k6 version 2>/dev/null | head -1)"
 K6_VERSION="${K6_VERSION:-unknown}"
@@ -168,7 +177,7 @@ db_query() {
 gateway_stop() { ssm_run "docker rm -f gateway >/dev/null 2>&1 || true" >/dev/null; }
 
 gateway_start() {
-  ssm_run "JAVA_TOOL_OPTIONS='${JAVA_OPTS}' /usr/local/bin/gateway-run.sh ${POOL_ARGS} ${EXTRA_ARGS}" >/dev/null
+  ssm_run "JAVA_TOOL_OPTIONS='${JAVA_OPTS}' /usr/local/bin/gateway-run.sh $1 ${EXTRA_ARGS}" >/dev/null
 }
 
 # 회차 사이에 DB를 비운다. 게이트웨이 재시작은 MySQL을 건드리지 않고
@@ -188,19 +197,38 @@ resolve_digest() {
 # ---------------------------------------------------------------------------
 
 # 진행 중인 트랜잭션이 0이 될 때까지 기다린다. 추측이 아니라 사실이다.
+#
+# "아직 안 끝났다"와 "못 읽었다"를 구분한다. 둘을 같게 다루면 SSM 장애가
+# 포화로 라벨링되는데, 그게 이 재작성이 없애려던 혼동이다.
+DRAIN_UNREADABLE=false
 drain_wait() {
-  local waited=0 remaining
-  while [ "${waited}" -lt "${DRAIN_CAP_SECONDS}" ]; do
+  local started="${SECONDS}" elapsed=0 remaining reads=0 failures=0
+
+  DRAIN_UNREADABLE=false
+  while :; do
     remaining="$(db_query "SELECT COUNT(*) FROM loan_limit_batch_run WHERE status='IN_PROGRESS';")" || remaining=""
     case "${remaining}" in
-      ''|*[!0-9]*) ;;                       # 못 읽었으면 다음 폴링에서 다시
-      0) echo "drained after ${waited}s"; return 0 ;;
-      *) : ;;
+      ''|*[!0-9]*) failures=$(( failures + 1 )) ;;
+      0)
+        echo "drained after $(( SECONDS - started ))s"
+        return 0
+        ;;
+      *) reads=$(( reads + 1 )) ;;
     esac
+
+    # SSM 왕복에도 시간이 걸리므로 sleep 횟수가 아니라 벽시계로 센다.
+    elapsed=$(( SECONDS - started ))
+    [ "${elapsed}" -lt "${DRAIN_CAP_SECONDS}" ] || break
     sleep "${DRAIN_POLL_SECONDS}"
-    waited=$(( waited + DRAIN_POLL_SECONDS ))
   done
-  echo "drain hit the ${DRAIN_CAP_SECONDS}s cap (still in progress: ${remaining:-unknown})" >&2
+
+  if [ "${reads}" -eq 0 ]; then
+    # 한 번도 숫자를 못 읽었다. 포화가 아니라 DB나 SSM 문제다.
+    DRAIN_UNREADABLE=true
+    echo "drain could not read the database for ${DRAIN_CAP_SECONDS}s (${failures} failed reads)" >&2
+  else
+    echo "drain hit the ${DRAIN_CAP_SECONDS}s cap (still in progress: ${remaining:-unknown})" >&2
+  fi
   return 1
 }
 
@@ -216,7 +244,9 @@ COUNT_SQL="SELECT
  (SELECT COUNT(*) FROM bank_call_result WHERE success=0 AND response_code='EXCEPTION'),
  (SELECT COUNT(*) FROM bank_call_result WHERE success=0 AND response_code NOT IN ('REJECTED','SUBMIT_ERROR','EXCEPTION')),
  (SELECT COUNT(*) FROM bank_call_result),
- (SELECT COUNT(*) FROM loan_limit_batch_run r WHERE (SELECT COUNT(*) FROM bank_call_result b WHERE b.run_id=r.id) < r.requested_bank_count);"
+ -- 예외로 끊긴 run 은 안 부른 은행의 행이 없는 게 정상이다. 빼지 않으면
+ -- 저장 실패로도 세어져 경고가 두 번 뜬다.
+ (SELECT COUNT(*) FROM loan_limit_batch_run r WHERE r.fail_reason IS NULL AND (SELECT COUNT(*) FROM bank_call_result b WHERE b.run_id=r.id) < r.requested_bank_count);"
 
 # 숫자 12개를 받아 JSON으로 만든다. 다섯 버킷의 합이 전체 행 수와 같은지
 # 여기서 확인한다 — 예전에 어느 카운터에도 안 잡히는 상태가 생겨서 run이
@@ -269,7 +299,7 @@ collect_counts() {
 
 echo "config    : ${CONFIG_NAME}"
 echo "modes     : ${MODES}"
-echo "pool      : ${POOL_LABEL}"
+echo "pool      : ${POOL:-(기본값)}${POOL:+ / queue ${QUEUE} — async-threadpool 회차에만 적용}"
 echo "rpms      : ${RPMS}"
 echo "repeats   : ${REPEATS}"
 echo "duration  : ${DURATION} (${DURATION_SECONDS}s)"
@@ -279,12 +309,16 @@ echo ""
 trap 'gateway_stop || true' EXIT
 
 invalid_rounds=0
+total_rounds=0
 
 for MODE in ${MODES}; do
+pool_label="$(pool_label_for "${MODE}")"
+pool_args="$(pool_args_for "${MODE}")"
+
 for rpm in ${RPMS}; do
 for rep in $(seq 1 "${REPEATS}"); do
-  run_id="${MODE}/${POOL_LABEL}/rpm${rpm}/rep${rep}"
-  out_dir="${RESULTS_ROOT}/${MODE}/${POOL_LABEL}/rpm${rpm}"
+  run_id="${MODE}/${pool_label}/rpm${rpm}/rep${rep}"
+  out_dir="${RESULTS_ROOT}/${MODE}/${pool_label}/rpm${rpm}"
   mkdir -p "${out_dir}"
 
   echo "=============================================================="
@@ -299,13 +333,18 @@ for rep in $(seq 1 "${REPEATS}"); do
 
   gateway_stop || true
 
-  if ! db_reset; then
-    echo "could not clear tables, skipping ${run_id}" >&2
+  # 게이트웨이를 먼저 띄운다. 부트스트랩은 MySQL과 mock만 준비하고 게이트웨이는
+  # 안 띄우므로, apply 직후 DB에는 스키마조차 없다(Flyway가 게이트웨이 기동 때
+  # 돈다). 비우기를 앞에 두면 없는 테이블을 TRUNCATE 하다 실패하고, 그 실패
+  # 때문에 게이트웨이를 안 띄워서 다음 회차도 똑같이 죽는다.
+  if ! gateway_start "${pool_args}"; then
+    echo "gateway failed to start, skipping ${run_id}" >&2
     round_ok=false
   fi
 
-  if [ "${round_ok}" = true ] && ! gateway_start; then
-    echo "gateway failed to start, skipping ${run_id}" >&2
+  # 기동 직후, k6 전에 비운다. 지난 회차 행이 남아 있으면 같이 세진다.
+  if [ "${round_ok}" = true ] && ! db_reset; then
+    echo "could not clear tables, skipping ${run_id}" >&2
     round_ok=false
   fi
 
@@ -316,61 +355,83 @@ for rep in $(seq 1 "${REPEATS}"); do
     digest="$(resolve_digest)" || digest="unknown"
 
     summary_file="${out_dir}/rep${rep}.summary.json"
-    if ! ( cd "${SCRIPT_DIR}" && \
+    k6_status=0
+    ( cd "${SCRIPT_DIR}" && \
       MODE="${MODE}" \
       LOAD_RPM="${rpm}" \
       DURATION="${DURATION}" \
       BASE_URL="${BASE_URL}" \
       MAX_WAIT_MS="${MAX_WAIT_MS}" \
       POLL_MAX_MS="${POLL_MAX_MS}" \
-      RUN_ID="${CONFIG_NAME}-${MODE}-${POOL_LABEL}-rpm${rpm}-rep${rep}" \
-      k6 run --summary-export="${summary_file}" load.js )
-    then
+      RUN_ID="${CONFIG_NAME}-${MODE}-${pool_label}-rpm${rpm}-rep${rep}" \
+      k6 run --summary-export="${summary_file}" load.js ) || k6_status=$?
+
+    # 99는 threshold 위반이다. 부하는 정상적으로 다 걸렸다는 뜻이라 회차를
+    # 버리면 안 된다 — threshold는 천장에서 깨지므로 제일 중요한 회차가
+    # 통째로 사라진다. 지금 load.js에는 threshold가 없지만, 나중에 추가될 때
+    # 조용히 그렇게 되는 걸 막는다.
+    if [ "${k6_status}" -eq 99 ]; then
+      echo "k6 threshold breached for ${run_id} (load was applied; keeping the round)" >&2
+    elif [ "${k6_status}" -ne 0 ]; then
       # k6가 죽으면 DB는 0을 돌려준다. 정상적으로 0인 것과 구분이 안 되므로
       # 여기서 무효로 표시해야 한다.
-      echo "k6 exited non-zero for ${run_id}" >&2
+      echo "k6 exited ${k6_status} for ${run_id}" >&2
       round_ok=false
     fi
   fi
 
   # k6는 DURATION에서 멈추지만 트랜잭션 e2e 하한이 31초다. 막바지에 넣은
   # 것들이 아직 돌고 있으므로 끝날 때까지 기다린 뒤에 센다.
-  if [ "${round_ok}" = true ] && ! drain_wait; then
-    drain_capped=true
-    round_ok=false
+  drained=false
+  drain_unreadable=false
+  if [ "${round_ok}" = true ]; then
+    if drain_wait; then
+      drained=true
+    else
+      drain_capped=true
+      drain_unreadable="${DRAIN_UNREADABLE}"
+    fi
   fi
 
+  # 드레인이 상한에 걸려도 숫자는 가져온다. 상한은 천장 근처에서 걸리는데
+  # 그게 제일 보고 싶은 회차다. 버리면 표에 천장 아래 점만 남는다.
+  # 회차는 여전히 무효다 — 안 끝난 트랜잭션을 두고 센 값이라 낮게 나온다.
   if [ "${round_ok}" = true ]; then
     if ! counts="$(collect_counts)"; then
       counts="null"
       round_ok=false
     elif [ "$(echo "${counts}" | jq -r '.balanced')" != "true" ]; then
       round_ok=false
+    elif [ "${drained}" != true ]; then
+      round_ok=false
     fi
   fi
 
   gateway_stop || true
 
+  total_rounds=$(( total_rounds + 1 ))
   [ "${round_ok}" = true ] || invalid_rounds=$(( invalid_rounds + 1 ))
 
   jq -n \
     --arg config "${CONFIG_NAME}" --arg run_id "${run_id}" \
-    --arg mode "${MODE}" --arg pool "${POOL_LABEL}" \
+    --arg mode "${MODE}" --arg pool "${pool_label}" \
     --argjson rpm "${rpm}" --argjson rep "${rep}" \
     --arg duration "${DURATION}" \
     --argjson duration_seconds "${DURATION_SECONDS}" \
     --arg java_opts "${JAVA_OPTS}" \
-    --arg spring_args "${POOL_ARGS} ${EXTRA_ARGS}" \
+    --arg spring_args "${pool_args} ${EXTRA_ARGS}" \
     --arg image "${digest}" --arg k6_version "${K6_VERSION}" \
     --arg started_at "${started_at}" \
     --argjson valid "${round_ok}" \
     --argjson drain_capped "${drain_capped}" \
+    --argjson drain_unreadable "${drain_unreadable}" \
     --argjson counts "${counts}" \
     '{config:$config, run_id:$run_id, mode:$mode, pool:$pool, rpm:$rpm,
       repeat:$rep, duration:$duration, duration_seconds:$duration_seconds,
       java_opts:$java_opts, spring_args:$spring_args, gateway_image:$image,
       k6_version:$k6_version, started_at:$started_at,
-      valid:$valid, drain_capped:$drain_capped, counts:$counts}' \
+      valid:$valid, drain_capped:$drain_capped,
+      drain_unreadable:$drain_unreadable, counts:$counts}' \
     > "${out_dir}/rep${rep}.manifest.json"
 
   echo "counts: ${counts}"
@@ -383,5 +444,13 @@ echo "done. parse with:"
 echo "  node ${SCRIPT_DIR}/parse.mjs ${RESULTS_ROOT}"
 if [ "${invalid_rounds}" -gt 0 ]; then
   echo ""
-  echo "${invalid_rounds} round(s) produced no usable numbers; they are marked valid=false" >&2
+  echo "${invalid_rounds}/${total_rounds} round(s) produced no usable numbers; marked valid=false" >&2
+fi
+
+# 한 회차도 못 건졌으면 실패로 끝낸다. 0으로 끝내면
+# `./bench.sh ... && node parse.mjs ...` 가 그대로 넘어가 빈 표를 찍고,
+# 완전히 망가진 상태가 정상 실행처럼 보인다.
+if [ "${invalid_rounds}" -eq "${total_rounds}" ]; then
+  echo "no usable rounds — check the gateway and the database on the A host" >&2
+  exit 1
 fi

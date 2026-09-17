@@ -6,6 +6,7 @@ import com.example.loanlimit.loanlimitbatchrun.entity.LoanLimitBatchRun
 import com.example.loanlimit.loanlimitbatchrun.entity.RunStatus
 import com.example.loanlimit.loanlimitbatchrun.repository.LoanLimitBatchRunRepository
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Test
 import org.mockito.kotlin.any
@@ -81,6 +82,24 @@ class FailReasonRecordedTest {
         service.markRunFailed(RUN_ID, "x".repeat(LoanLimitBatchRunService.FAIL_REASON_MAX + 200))
 
         assertEquals(LoanLimitBatchRunService.FAIL_REASON_MAX, saved[0].failReason?.length)
+    }
+
+    @Test
+    fun `서로게이트 쌍 가운데를 자르지 않는다`() {
+        val saved = mutableListOf<LoanLimitBatchRun>()
+        givenRun(saved)
+        whenever(callResultRepository.countByRunId(RUN_ID)).thenReturn(0L)
+        whenever(callResultRepository.countByRunIdAndSuccess(RUN_ID, true)).thenReturn(0L)
+
+        // 경계 바로 앞이 서로게이트 쌍의 앞쪽이 되도록 만든다. 그냥 자르면
+        // 홀로 남은 서로게이트가 되고 MySQL이 그 문자열을 거부한다.
+        val reason = "x".repeat(LoanLimitBatchRunService.FAIL_REASON_MAX - 1) + "😀".repeat(10)
+
+        service.markRunFailed(RUN_ID, reason)
+
+        val stored = saved[0].failReason!!
+        assertEquals(LoanLimitBatchRunService.FAIL_REASON_MAX - 1, stored.length)
+        assertFalse(Character.isHighSurrogate(stored[stored.length - 1]))
     }
 
     @Test

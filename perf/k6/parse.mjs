@@ -37,6 +37,7 @@ const runs = walk(root).map((manifestPath) => {
   return {
     valid: m.valid === true,
     drainCapped: m.drain_capped === true,
+    drainUnreadable: m.drain_unreadable === true,
     mode: m.mode ?? '-',
     pool: m.pool ?? '-',
     rpm: m.rpm,
@@ -152,11 +153,29 @@ const notes = [];
 // 무효 회차. 왜 무효인지까지 적어야 "측정 실패"와 "포화"가 구분된다.
 const invalid = runs.filter((r) => !r.valid);
 if (invalid.length > 0) {
-  const capped = invalid.filter((r) => r.drainCapped).length;
+  // 드레인이 안 끝난 것과 DB를 못 읽은 것을 갈라 적는다. 합치면 인프라
+  // 장애가 포화로 읽힌다.
+  const unreadable = invalid.filter((r) => r.drainUnreadable).length;
+  const capped = invalid.filter((r) => r.drainCapped && !r.drainUnreadable).length;
   const unbalanced = invalid.filter((r) => !r.balanced).length;
   notes.push(
     `⚠️ 무효 회차 ${invalid.length}건 (표에서 제외). ` +
-      `드레인 상한 ${capped}건, 집계 불일치 ${unbalanced}건, 나머지는 기동·k6·DB 실패다.`,
+      `드레인 상한 ${capped}건, DB를 못 읽음 ${unreadable}건, ` +
+      `집계 불일치 ${unbalanced}건, 나머지는 기동·k6 실패다.`,
+  );
+  if (unreadable > 0) {
+    notes.push('⚠️ DB를 못 읽어 무효가 된 회차가 있다. 포화가 아니라 SSM·MySQL 문제다.');
+  }
+}
+
+// 상한에 걸렸어도 숫자는 남아 있다. 안 끝난 트랜잭션을 두고 센 값이라
+// 실제보다 낮지만, 거부가 났는지는 보인다 — 천장 판단의 근거가 된다.
+const cappedWithCounts = runs.filter((r) => r.drainCapped && !r.drainUnreadable && r.callsRejected != null);
+if (cappedWithCounts.length > 0) {
+  const rejected = sum(cappedWithCounts.map((r) => r.callsRejected));
+  notes.push(
+    `ℹ️ 드레인 상한에 걸린 회차 ${cappedWithCounts.length}건의 거부된 은행콜 ${rejected}건. ` +
+      `표에는 없지만 manifest에 남아 있다 — 이 지점이 천장 근처라는 신호다.`,
   );
 }
 
