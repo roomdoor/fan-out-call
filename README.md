@@ -17,14 +17,14 @@ mock 서버: [`roomdoor/fan-out-api-mock-server`](https://github.com/roomdoor/fa
 
 | 모드 | 스레드 | 480 RPM 결과 | 지연이 유지되는 한계 |
 | --- | --- | --- | --- |
-| **async-threadpool** | @Async 512 + IO 512 ≈ **1,024** | 은행콜 3,409건 거부, 처리율 338.8/분 | 480에서 이미 포화 |
-| **coroutine** | IO **512** | 거부 0, 처리율 480.3/분 | **1,600 RPM** |
-| **webclient** | IO **512** | 거부 0, 처리율 480.3/분 | **1,600 RPM** |
+| **async-threadpool** | 풀 **4,096** | 은행콜 3,409건 거부, 처리율 338.8/분 | 480에서 이미 포화 |
+| **coroutine** | IO 디스패처 **512** | 거부 0, 처리율 480.3/분 | **1,600 RPM** |
+| **webclient** | 이벤트 루프 + 저장만 IO **512** | 거부 0, 처리율 480.3/분 | **1,600 RPM** |
 | sequential | 1 | — | anti-pattern 시연용 |
 
-논블로킹 두 모드는 1,800 RPM에서도 7,200건을 **전부 처리했다.** 거부가 아니라 지연이 늘었을 뿐이다(31.4초 → 56.3 / 44.6초). 위 표의 1,600은 "이론 하한 지연을 유지하는" 한계다.
+**스레드를 8분의 1만 쓰고 부하를 전부 받아냈다.** 그때 게이트웨이 CPU는 16%였다(CloudWatch) — 자원이 없어서 거부한 게 아니다.
 
-**스레드를 절반만 쓰고 부하를 전부 받아냈다.** 그때 게이트웨이 CPU는 16%였다 — 자원이 없어서 거부한 게 아니다.
+논블로킹 두 모드는 1,800 RPM에서도 7,200건을 **전부 처리했다.** 거부가 아니라 지연이 늘었을 뿐이다(31.4초 → 56.3 / 44.6초). 위 표의 1,600은 "이론 하한 지연을 유지하는" 한계다.
 
 > mock 고정 지연(정상 48개 7~13초, slow 2개 30초, 성공률 100%) 기반의 상대 비교다. 실제 금융사 성능이 아니다.
 
@@ -79,10 +79,12 @@ mock 서버: [`roomdoor/fan-out-api-mock-server`](https://github.com/roomdoor/fa
 
 | | 포화 신호 | 받은 요청은 |
 | --- | --- | --- |
-| async-threadpool | 즉시 거부 (큐 200칸이 차면) | 31초에 끝낸다 |
+| async-threadpool | 즉시 거부 (큐 200칸이 차면) | 31~36초에 끝낸다 |
 | 논블로킹 | 지연 증가 | 다 받지만 다 늦어진다 |
 
-거절할 큐가 없으니 일이 그냥 쌓인다. 어느 쪽이 나은지는 요구사항이 정한다 — "늦어도 다 처리"면 논블로킹, "빠르거나 거절"이면 큐 있는 쪽이다.
+논블로킹에도 대기열은 있다(`pendingAcquireMaxCount` 10,000, 60초 타임아웃). 다만 이번 부하에서는 커넥션 여유가 커서 한 번도 걸리지 않았고, 그래서 거절 없이 지연만 늘었다.
+
+어느 쪽이 나은지는 요구사항이 정한다 — "늦어도 다 처리"면 논블로킹, "빠르거나 거절"이면 큐 있는 쪽이다.
 
 **두 논블로킹 구현은 1600까지 구분되지 않는다.** 1200에서 7ms 차이다. 1800에서 처음 갈린다(webclient가 21% 빠름). 차이는 "코루틴이냐 Reactor냐"가 아니라 **"스레드를 붙잡느냐 놓느냐"** 에 있다.
 
@@ -98,12 +100,14 @@ mock 서버: [`roomdoor/fan-out-api-mock-server`](https://github.com/roomdoor/fa
 
 CPU가 증거다.
 
-| | CPU |
+| | 게이트웨이 CPU |
 | --- | --- |
 | async-threadpool, 480 RPM에서 3,409건 거부 | 약 16% |
 | coroutine, 1,200 RPM 무흠집 | 31% |
 
 기계가 84% 놀고 있는데 거부했다.
+
+> CPU는 CloudWatch(`AWS/EC2 CPUUtilization`, 5분 최대)를 측정 시각으로 조회한 값이다. `bench.sh` 도 `parse.mjs` 도 CPU를 기록하지 않으므로 `results/` 에는 없다.
 
 ---
 
@@ -113,16 +117,17 @@ CPU가 증거다.
 
 | 후보 | 검증 |
 | --- | --- |
-| 커넥션 풀 | 20,000 → 40,000, 지연 1.0% 차이 |
+| 커넥션 풀 | 20,000 → 40,000, 지연 1.0% 차이. 애초에 근처도 안 갔다(위 참고) |
 | IO 워커 | 512 → 1,024, webclient는 오히려 16% 악화 |
-| CPU | k6 5.8% / 게이트웨이 38.4% / mock 20.1% |
+| CPU | k6 5.8% / 게이트웨이 38.4% / mock 20.1% (CloudWatch) |
 | **DB 저장** | 초당 1,500건, 게이트웨이와 같은 호스트. **미검증** |
+| **은행 호출 타임아웃** | `per-call-timeout-ms: 50000`. 1800에서 e2e 최대가 69초까지 갔고 `conn40k` 회차에 예외 4건이 났다. **미검증** |
 
 IO 워커를 늘렸더니 느려진 것이 DB 쪽을 가리킨다. 두 모드 모두 결과 저장을 `Dispatchers.IO` 로 넘기므로, 워커가 두 배면 MySQL로 가는 동시 저장도 두 배다.
 
 **논블로킹 천장도 못 찾았다.** 1800에서 꺾이지만 거부가 없어 "천장"의 정의가 필요하다. SLA를 정하면(예: e2e p95 45초) 그 지점이 천장이 된다.
 
-**전부 n=1이다.** pool512만 두 번 쟀고 e2e p95가 7ms 차이로 재현됐다.
+**전부 n=1이다.** 커밋된 24회차 모두 `repeat: 1` 이다. pool512는 실제로 두 번 쟀고 e2e p95가 7ms 차이로 재현됐지만, 1차 측정 파일이 인스턴스 교체 때 사라져 **레포에서는 확인할 수 없다.**
 
 ---
 
@@ -172,13 +177,17 @@ app:
     per-call-timeout-ms: 50000
   web-client-fan-out:
     routing-mode: sharded      # 10 샤드에 분산
-    max-connections: 20000     # RPM × 9 이상. 8000이면 889 RPM에서 먼저 마른다
+    max-connections: 20000     # 샤드(원격 주소)마다 적용된다. 아래 참고
 ```
 
 **모드 선택**
 
 - **coroutine / webclient** — 이 부하 범위에서 차이가 없다. 코드 스타일로 고르면 된다
 - **async-threadpool** — 쓰려면 `pool ≥ 목표 RPM × 9` 를 확보해야 한다. 480 RPM이면 4,320개다
+
+**`max-connections` 는 전체가 아니라 원격 주소마다다.** Reactor Netty의 `ConnectionProvider` 가 그렇게 동작하고, mock이 10샤드로 갈려 있어 풀이 10개 생긴다. 샤드당 수요는 `RPM × 0.9` 라 20,000이면 약 22,000 RPM까지 여유가 있다.
+
+이번 측정에서 커넥션은 한 번도 제약이 아니었다. 20,000 → 40,000으로 올려도 지연이 1.0%밖에 안 변한 이유다.
 
 **커넥션 풀은 스레드보다 싸다.** 스레드 1개가 1MB 스택을 쓰는 반면 커넥션은 수십 KB다. 논블로킹은 비싼 자원(스레드)을 싼 자원(커넥션)으로 바꾸는 셈이다.
 
@@ -208,13 +217,13 @@ config/                 AppProperties, AsyncExecutionConfig, WebClientConfig
 ### API
 
 ```
-POST /api/v1/loan-limit/queries                       # coroutine
+POST /api/v1/loan-limit/coroutine/queries
 POST /api/v1/loan-limit/async-threadpool/queries
 POST /api/v1/loan-limit/webclient/queries
 POST /api/v1/loan-limit/sequential/queries
 
 GET  /api/v1/loan-limit/queries/request/{requestId}   # polling (모드 공통)
-GET  /api/v1/loan-limit/queries/number/{transactionNo}
+GET  /api/v1/loan-limit/queries/number/{runId}
 ```
 
 요청:
@@ -247,15 +256,19 @@ submit은 즉시 `202 Accepted` 와 `transactionNo`, `requestId` 를 반환한�
 ### AWS에서 측정
 
 ```bash
-cd infra
-terraform init && terraform apply
+# 로컬 (저장소 루트)
+terraform -chdir=infra init && terraform -chdir=infra apply
+terraform -chdir=infra output next_steps
 
-# 출력의 next_steps 를 따른다
-#   1) 부트스트랩 확인
-#   2) ./smoke.sh          배포 직후 점검, 2~3분
-#   3) ./bench.sh config/v15-pool512.env
-#   4) ./perf/k6/fetch-results.sh   결과 회수 (destroy 전에)
-#   5) terraform destroy
+# k6 호스트 안에서 (세션 접속 명령은 output connect 에 있다)
+sudo -i
+cd /opt/fan-out-call/perf/k6
+./smoke.sh                            # 배포 직후 점검, 2~3분
+./bench.sh config/v15-pool512.env
+
+# 다시 로컬에서
+./perf/k6/fetch-results.sh            # 결과 회수. destroy 전에 반드시
+terraform -chdir=infra destroy
 ```
 
 인스턴스는 쓸 때만 켠다. 측정 사이에는 `stop` 으로 내려두면 결과가 디스크에 남고 EBS 요금만 든다.
