@@ -22,7 +22,9 @@ mock 서버: [`roomdoor/fan-out-api-mock-server`](https://github.com/roomdoor/fa
 | **webclient** | 이벤트 루프 + 저장만 IO **512** | 거부 0, 처리율 480.3/분 | **1,600 RPM** |
 | sequential | 1 | — | anti-pattern 시연용 |
 
-**스레드를 8분의 1만 쓰고 부하를 전부 받아냈다.** 그때 게이트웨이 CPU는 16%였다(CloudWatch) — 자원이 없어서 거부한 게 아니다.
+**스레드를 9분의 1만 쓰고 부하를 전부 받아냈다.** async-threadpool 쪽은 풀 4,096에 더해 IO 워커 512를 함께 받았다(4,608 대 512).
+
+거부한 쪽의 게이트웨이 CPU가 16%였다 — 자원이 없어서 거부한 게 아니다.
 
 논블로킹 두 모드는 1,800 RPM에서도 7,200건을 **전부 처리했다.** 거부가 아니라 지연이 늘었을 뿐이다(31.4초 → 56.3 / 44.6초). 위 표의 1,600은 "이론 하한 지연을 유지하는" 한계다.
 
@@ -82,7 +84,7 @@ mock 서버: [`roomdoor/fan-out-api-mock-server`](https://github.com/roomdoor/fa
 | async-threadpool | 즉시 거부 (큐 200칸이 차면) | 31~36초에 끝낸다 |
 | 논블로킹 | 지연 증가 | 다 받지만 다 늦어진다 |
 
-논블로킹에도 대기열은 있다(`pendingAcquireMaxCount` 10,000, 60초 타임아웃). 다만 이번 부하에서는 커넥션 여유가 커서 한 번도 걸리지 않았고, 그래서 거절 없이 지연만 늘었다.
+논블로킹에도 대기열은 있다(`pendingAcquireMaxCount` 10,000 — 이것도 샤드마다라 실질 100,000, 60초 타임아웃). 다만 이번 부하에서는 커넥션 여유가 커서 한 번도 걸리지 않았고, 그래서 거절 없이 지연만 늘었다.
 
 어느 쪽이 나은지는 요구사항이 정한다 — "늦어도 다 처리"면 논블로킹, "빠르거나 거절"이면 큐 있는 쪽이다.
 
@@ -92,7 +94,7 @@ mock 서버: [`roomdoor/fan-out-api-mock-server`](https://github.com/roomdoor/fa
 
 ---
 
-## 3. 왜 스레드가 8배 많은데 지는가
+## 3. 왜 스레드가 9배 많은데 지는가
 
 **스레드가 노는 게 아니라, 막혀 있으면서 자리를 차지한다.**
 
@@ -107,7 +109,7 @@ CPU가 증거다.
 
 기계가 84% 놀고 있는데 거부했다.
 
-> CPU는 CloudWatch(`AWS/EC2 CPUUtilization`, 5분 최대)를 측정 시각으로 조회한 값이다. `bench.sh` 도 `parse.mjs` 도 CPU를 기록하지 않으므로 `results/` 에는 없다.
+> CPU는 CloudWatch(`AWS/EC2 CPUUtilization`)를 측정 시각으로 조회한 값이다. **기본 모니터링이라 5분 단위**인데 회차는 4분이라, 한 데이터포인트에 유휴 구간이 섞인다. 실제 부하 중 CPU는 이 값보다 높다 — **자릿수 비교용이지 정확한 수치가 아니다.** `bench.sh` 도 `parse.mjs` 도 CPU를 기록하지 않으므로 `results/` 에는 없다.
 
 ---
 
@@ -127,7 +129,7 @@ IO 워커를 늘렸더니 느려진 것이 DB 쪽을 가리킨다. 두 모드 �
 
 **논블로킹 천장도 못 찾았다.** 1800에서 꺾이지만 거부가 없어 "천장"의 정의가 필요하다. SLA를 정하면(예: e2e p95 45초) 그 지점이 천장이 된다.
 
-**전부 n=1이다.** 커밋된 24회차 모두 `repeat: 1` 이다. pool512는 실제로 두 번 쟀고 e2e p95가 7ms 차이로 재현됐지만, 1차 측정 파일이 인스턴스 교체 때 사라져 **레포에서는 확인할 수 없다.**
+**전부 n=1이다.** 커밋된 24회차 모두 `repeat: 1` 이다. pool512는 실제로 두 번 쟀고 결론(30 깨끗 / 60 거부)이 같았지만, 1차 측정 파일이 인스턴스 교체 때 사라져 **레포에서는 확인할 수 없다.**
 
 ---
 
@@ -185,7 +187,9 @@ app:
 - **coroutine / webclient** — 이 부하 범위에서 차이가 없다. 코드 스타일로 고르면 된다
 - **async-threadpool** — 쓰려면 `pool ≥ 목표 RPM × 9` 를 확보해야 한다. 480 RPM이면 4,320개다
 
-**`max-connections` 는 전체가 아니라 원격 주소마다다.** Reactor Netty의 `ConnectionProvider` 가 그렇게 동작하고, mock이 10샤드로 갈려 있어 풀이 10개 생긴다. 샤드당 수요는 `RPM × 0.9` 라 20,000이면 약 22,000 RPM까지 여유가 있다.
+**`max-connections` 는 전체가 아니라 원격 주소마다다.** Reactor Netty의 `ConnectionProvider` 가 그렇게 동작하고, mock이 10샤드로 갈려 있어 풀이 10개 생긴다. `pendingAcquireMaxCount` 도 마찬가지다.
+
+**샤드당 수요는 균등하지 않다.** 샤딩이 `(bankNumber-1) % 10` 이라 30초짜리 느린 은행 2개가 한두 샤드에 몰린다. 가장 무거운 샤드가 `4×10 + 30 = 70` 커넥션초를 쓰므로 `RPM × 1.17` 이고, 둘이 같은 샤드면 `RPM × 1.5` 다. 20,000이면 약 13,000~17,000 RPM까지 여유가 있다.
 
 이번 측정에서 커넥션은 한 번도 제약이 아니었다. 20,000 → 40,000으로 올려도 지연이 1.0%밖에 안 변한 이유다.
 
@@ -223,7 +227,7 @@ POST /api/v1/loan-limit/webclient/queries
 POST /api/v1/loan-limit/sequential/queries
 
 GET  /api/v1/loan-limit/queries/request/{requestId}   # polling (모드 공통)
-GET  /api/v1/loan-limit/queries/number/{runId}
+GET  /api/v1/loan-limit/queries/number/{transactionNo}
 ```
 
 요청:
