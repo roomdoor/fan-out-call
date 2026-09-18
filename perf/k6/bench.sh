@@ -368,6 +368,19 @@ done
 done
 done
 
+# 결과를 바로 S3 로 올린다. 이 호스트가 사라지면 결과도 같이 사라지는데,
+# 사람이 나중에 챙기는 단계로 두면 잊거나 그 전에 인스턴스가 교체된다.
+# RESULTS_BUCKET 이 없으면 조용히 건너뛴다 — 로컬 실험을 막지 않는다.
+if [ -n "${RESULTS_BUCKET:-}" ]; then
+  echo "uploading results to s3://${RESULTS_BUCKET}/results/${CONFIG_NAME}/ ..."
+  if aws s3 sync "${RESULTS_ROOT}/" "s3://${RESULTS_BUCKET}/results/${CONFIG_NAME}/" --only-show-errors; then
+    echo "uploaded."
+  else
+    # 측정은 끝났고 파일은 여기 있다. 올리기 실패로 결과를 버리지 않는다.
+    echo "S3 업로드 실패. 결과는 ${RESULTS_ROOT} 에 있다 — destroy 전에 회수할 것." >&2
+  fi
+fi
+
 echo "done. parse with:"
 echo "  node ${SCRIPT_DIR}/parse.mjs ${RESULTS_ROOT}"
 if [ "${invalid_rounds}" -gt 0 ]; then

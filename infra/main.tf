@@ -430,6 +430,7 @@ resource "aws_instance" "k6" {
     region              = var.region
     repo_ref            = var.repo_ref
     k6_version          = var.k6_version
+    results_bucket      = aws_s3_bucket.results.bucket
   })
 
   # bench.sh가 ssm:SendCommand를 쓰므로 정책이 먼저 있어야 한다. 부팅
