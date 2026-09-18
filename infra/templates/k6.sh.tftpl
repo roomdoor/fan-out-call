@@ -11,24 +11,24 @@ exec > >(tee /var/log/bench-bootstrap.log) 2>&1
 # 마지막 단계에서 command not found로 죽는다.
 dnf install -y git jq nodejs awscli-2 || dnf install -y git jq nodejs
 
-# k6 공식 RPM 저장소
-cat > /etc/yum.repos.d/k6.repo <<'REPO'
-[k6]
-name=k6
-baseurl=https://dl.k6.io/rpm
-enabled=1
-gpgcheck=1
-gpgkey=https://dl.k6.io/key.gpg
-REPO
+# k6는 GitHub 릴리스 타르볼에서 받는다. RPM 저장소(dl.k6.io/rpm)는 404를
+# 주고 NoSuchKey를 반환한다 — 없어졌다.
+#
 # 버전을 고정한다. 조건 추적이 이 저장소의 설계 전제인데 정작 재는 도구가
 # 미추적 변수로 남으면 안 된다. bench.sh가 manifest에도 기록한다.
-#
-# 저장소에서 그 버전이 빠졌거나 NEVR 형식이 달라 못 찾으면 set -e 로
-# 여기서 중단되는데, 그러면 준비 마커도 안 생기고 apply는 성공으로 보인다.
-# 실패 시 어떤 버전이 있는지 로그에 남겨 원인을 바로 알 수 있게 한다.
-if ! dnf install -y "k6-${k6_version}"; then
-  echo "k6-${k6_version} 설치 실패. 사용 가능한 버전:" >&2
-  dnf list --showduplicates k6 >&2 || true
+k6_url="https://github.com/grafana/k6/releases/download/v${k6_version}/k6-v${k6_version}-linux-amd64.tar.gz"
+if ! curl -fsSL --retry 3 "$${k6_url}" -o /tmp/k6.tar.gz; then
+  echo "k6 ${k6_version} 내려받기 실패: $${k6_url}" >&2
+  exit 1
+fi
+tar -xzf /tmp/k6.tar.gz -C /tmp
+install -m 0755 "/tmp/k6-v${k6_version}-linux-amd64/k6" /usr/local/bin/k6
+rm -rf /tmp/k6.tar.gz "/tmp/k6-v${k6_version}-linux-amd64"
+
+# 받은 게 실제로 도는지, 버전이 맞는지 확인한다. 여기서 안 잡으면
+# 첫 측정 회차에서 k6가 없다는 걸 알게 된다.
+if ! k6 version; then
+  echo "k6 설치 후 실행 실패" >&2
   exit 1
 fi
 
@@ -82,11 +82,13 @@ sed -i \
 # repo_ref가 가리키는 브랜치에 bench.sh가 있어야 한다.
 git clone --depth 1 --branch "${repo_ref}" \
   https://github.com/roomdoor/fan-out-call.git /opt/fan-out-call
-if [ ! -f /opt/fan-out-call/perf/k6/bench.sh ]; then
-  echo "bench.sh not found on ref '${repo_ref}'. 측정 스크립트가 머지된 ref를 repo_ref로 지정할 것." >&2
-  exit 1
-fi
-chmod +x /opt/fan-out-call/perf/k6/bench.sh
+for script in bench.sh smoke.sh; do
+  if [ ! -f "/opt/fan-out-call/perf/k6/$${script}" ]; then
+    echo "$${script} not found on ref '${repo_ref}'. 측정 스크립트가 머지된 ref를 repo_ref로 지정할 것." >&2
+    exit 1
+  fi
+  chmod +x "/opt/fan-out-call/perf/k6/$${script}"
+done
 
 # mock 샤드가 전부 응답하는지 확인한다. 하나라도 못 뜨면 준비 마커를 만들지 않는다.
 for i in $(seq 0 $(( ${shard_count} - 1 ))); do
@@ -106,4 +108,4 @@ for i in $(seq 0 $(( ${shard_count} - 1 ))); do
 done
 
 touch /var/lib/bench-ready
-echo "k6 host ready. run: cd /opt/fan-out-call/perf/k6 && ./bench.sh config/v15-baseline.env"
+echo "k6 host ready. run: cd /opt/fan-out-call/perf/k6 && ./smoke.sh"

@@ -1,13 +1,11 @@
 #!/bin/bash
-# 측정 오케스트레이터. C 호스트(k6)에서 돈다.
+# 측정 오케스트레이터. C 호스트(k6)에서 돌며 게이트웨이(A)를 SSM으로 조종한다.
 #
-# 게이트웨이(A 호스트)는 SSM으로 제어한다. k6는 이 기계에서 직접 돌린다.
-# 측정 대상 호스트에는 게이트웨이와 MySQL 외에 아무것도 올리지 않는다.
+#   ./bench.sh config/v15-pool512.env
+#   node parse.mjs results/v15-pool512
 #
-#   ./bench.sh config/v15-baseline.env
-#
-# 회차마다 manifest.json에 측정 조건을 남긴다. 조건을 모른 채 측정해서
-# 결과를 통째로 버린 일이 v6, v13에서 있었다.
+# 설정 하나 = pool 하나. 숫자는 게이트웨이 DB에서 센다.
+# 배경은 DECISIONS.md 참조.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,7 +13,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG="${1:-}"
 if [ -z "${CONFIG}" ]; then
   echo "usage: $0 <config.env>" >&2
-  echo "example: $0 config/v15-baseline.env" >&2
   exit 1
 fi
 [ -f "${CONFIG}" ] || { echo "config not found: ${CONFIG}" >&2; exit 1; }
@@ -24,278 +21,363 @@ fi
 source "${CONFIG}"
 CONFIG_NAME="$(basename "${CONFIG}" .env)"
 
-# Terraform이 /etc/profile.d/bench.sh 에 심어둔 값들
+# Terraform이 /etc/profile.d/bench.sh 에 심어둔다.
 : "${GATEWAY_INSTANCE_ID:?GATEWAY_INSTANCE_ID not set (source /etc/profile.d/bench.sh)}"
 : "${AWS_REGION:?AWS_REGION not set}"
 : "${BASE_URL:?BASE_URL not set}"
 
-MODE="${MODE:-coroutine}"
+MODES="${MODES:-${MODE:-coroutine}}"
 RPMS="${RPMS:?RPMS not set in config}"
-POOLS="${POOLS:-default}"
-REPEATS="${REPEATS:-1}"
-DURATION="${DURATION:-2m}"
-MAX_WAIT_MS="${MAX_WAIT_MS:-120000}"
+REPEATS="${REPEATS:-3}"
+DURATION="${DURATION:-4m}"
+POOL="${POOL:-}"
+QUEUE="${QUEUE:-200}"
+MAX_WAIT_MS="${MAX_WAIT_MS:-180000}"
 POLL_MAX_MS="${POLL_MAX_MS:-5000}"
-# 드레인은 고정 시간이 아니라 완료가 멈출 때까지 기다린다.
-DRAIN_POLL_SECONDS="${DRAIN_POLL_SECONDS:-15}"
-DRAIN_STABLE_CHECKS="${DRAIN_STABLE_CHECKS:-2}"
-
-# 재는 도구도 조건이다. || echo 를 파이프 뒤에 붙이면 pipefail 때문에
-# SIGPIPE가 실패로 잡혀 캡처된 줄 뒤에 unknown 이 덧붙는다.
-K6_VERSION="$(k6 version 2>/dev/null | head -1)"
-K6_VERSION="${K6_VERSION:-unknown}"
+DRAIN_POLL_SECONDS="${DRAIN_POLL_SECONDS:-10}"
 JAVA_OPTS="${JAVA_OPTS:-}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
+
+MYSQL_CONTAINER="${MYSQL_CONTAINER:-mysql}"
+MYSQL_DATABASE="${MYSQL_DATABASE:-loan_limit_gateway}"
+
+# ---------------------------------------------------------------------------
+# 설정 검증 — EC2 시간을 쓰기 전에 전부 본다.
+# ---------------------------------------------------------------------------
+
+config_error() { echo "config error: $*" >&2; exit 1; }
+
+require_int() {
+  case "$2" in
+    ''|*[!0-9]*) config_error "$1 must be a whole number, got '$2'" ;;
+  esac
+}
+
+for value in ${RPMS}; do require_int "RPMS" "${value}"; done
+require_int "REPEATS" "${REPEATS}"
+[ "${REPEATS}" -ge 1 ] || config_error "REPEATS must be at least 1"
+require_int "MAX_WAIT_MS" "${MAX_WAIT_MS}"
+require_int "POLL_MAX_MS" "${POLL_MAX_MS}"
+require_int "DRAIN_POLL_SECONDS" "${DRAIN_POLL_SECONDS}"
+# 0이면 드레인 루프가 쉬지 않고 SSM을 때린다.
+[ "${DRAIN_POLL_SECONDS}" -ge 1 ] || config_error "DRAIN_POLL_SECONDS must be at least 1"
+require_int "QUEUE" "${QUEUE}"
+[ -n "${POOL}" ] && require_int "POOL" "${POOL}"
+
+# "1m30s" 는 안 받는다. 초로 정확히 바꿀 수 있는 형태만 통과시킨다.
+case "${DURATION}" in
+  *[0-9]s) DURATION_UNIT=1 ;;
+  *[0-9]m) DURATION_UNIT=60 ;;
+  *[0-9]h) DURATION_UNIT=3600 ;;
+  *) config_error "DURATION must look like 90s, 4m or 1h, got '${DURATION}'" ;;
+esac
+DURATION_VALUE="${DURATION%[smh]}"
+case "${DURATION_VALUE}" in
+  ''|*[!0-9]*) config_error "DURATION must look like 90s, 4m or 1h, got '${DURATION}'" ;;
+esac
+DURATION_SECONDS=$(( DURATION_VALUE * DURATION_UNIT ))
+
+# sequential 은 측정하지 않는다(트랜잭션 하나가 9분이라 회차 안에 안 끝난다).
+# 아래 측정 루프와 같은 방식으로 쪼개야 여러 줄로 쓴 MODES 도 걸린다.
+for mode in ${MODES}; do
+  [ "${mode}" = "sequential" ] && config_error "sequential is not measured (see README.md)"
+done
+
+# pool 설정은 async-threadpool 모드만 읽는다. 다른 모드에 붙이면 manifest 에
+# 그 모드가 갖지 않은 조건이 기록된다.
+pool_label_for() {
+  if [ -n "${POOL}" ] && [ "$1" = "async-threadpool" ]; then
+    echo "pool${POOL}-q${QUEUE}"
+  else
+    echo "default"
+  fi
+}
+
+pool_args_for() {
+  if [ -n "${POOL}" ] && [ "$1" = "async-threadpool" ]; then
+    echo "--app.async-thread-pool.core-pool-size=${POOL} --app.async-thread-pool.max-pool-size=${POOL} --app.async-thread-pool.queue-capacity=${QUEUE}"
+  fi
+}
+
+K6_VERSION="$(k6 version 2>/dev/null | head -1)"
+K6_VERSION="${K6_VERSION:-unknown}"
 
 RESULTS_ROOT="${SCRIPT_DIR}/results/${CONFIG_NAME}"
 mkdir -p "${RESULTS_ROOT}"
 
+# 드레인 상한. 트랜잭션 하나의 e2e 하한이 31초라 여유를 둔다.
+DRAIN_CAP_SECONDS=$(( MAX_WAIT_MS / 1000 + 60 ))
+
+# shellcheck source=lib/remote.sh
+source "${SCRIPT_DIR}/lib/remote.sh"
+
 # ---------------------------------------------------------------------------
-# SSM 헬퍼
-#
-# stdout은 API가 24,000자에서 잘라낸다. 그래서 게이트웨이 로그 원본을
-# 이쪽으로 끌어오지 않는다. A에서 세고 숫자만 받는다.
+# 회차
 # ---------------------------------------------------------------------------
 
-ssm_run() {
-  local instance="$1" script="$2"
-  local params cmd_id status
+# 진행 중인 트랜잭션이 0이 될 때까지 기다린다.
+# "아직 안 끝났다"와 "못 읽었다"를 구분한다 — 합치면 SSM 장애가 포화로 보인다.
+DRAIN_UNREADABLE=false
+drain_wait() {
+  local started="${SECONDS}" elapsed=0 remaining last_good="" consecutive_failures=0
 
-  params="$(jq -n --arg s "${script}" '{commands: [$s], executionTimeout: ["3600"]}')"
-
-  cmd_id="$(aws ssm send-command \
-    --region "${AWS_REGION}" \
-    --instance-ids "${instance}" \
-    --document-name AWS-RunShellScript \
-    --parameters "${params}" \
-    --query 'Command.CommandId' --output text)"
-
-  local done=false
-  for _ in $(seq 1 300); do
-    status="$(aws ssm get-command-invocation \
-      --region "${AWS_REGION}" \
-      --command-id "${cmd_id}" \
-      --instance-id "${instance}" \
-      --query 'Status' --output text 2>/dev/null || echo Pending)"
-    case "${status}" in
-      Success) done=true; break ;;
-      Failed|Cancelled|TimedOut)
-        echo "SSM command ${status}:" >&2
-        aws ssm get-command-invocation --region "${AWS_REGION}" \
-          --command-id "${cmd_id}" --instance-id "${instance}" \
-          --query 'StandardErrorContent' --output text >&2
-        return 1
+  DRAIN_UNREADABLE=false
+  while :; do
+    remaining="$(db_query "SELECT COUNT(*) FROM loan_limit_batch_run WHERE status='IN_PROGRESS';")" || remaining=""
+    case "${remaining}" in
+      ''|*[!0-9]*) consecutive_failures=$(( consecutive_failures + 1 )) ;;
+      0)
+        echo "drained after $(( SECONDS - started ))s"
+        return 0
         ;;
+      *) consecutive_failures=0; last_good="${remaining}" ;;
     esac
-    sleep 2
+
+    # SSM 왕복에도 시간이 걸리므로 sleep 횟수가 아니라 벽시계로 센다.
+    elapsed=$(( SECONDS - started ))
+    [ "${elapsed}" -lt "${DRAIN_CAP_SECONDS}" ] || break
+    sleep "${DRAIN_POLL_SECONDS}"
   done
 
-  # 폴링이 끝났는데 Success가 아니면 실패로 처리한다. 그냥 빠져나가면
-  # 부분 출력이 정상 결과처럼 반환되고, 뜨지도 않은 게이트웨이에
-  # k6를 돌려서 그 숫자가 유효한 회차로 기록된다.
-  if [ "${done}" != true ]; then
-    echo "SSM command did not finish in time (last status: ${status})" >&2
-    return 1
+  # 기준은 "상한에 닿는 순간 읽고 있었나"다. 누적 성공 횟수로 보면 첫 폴링만
+  # 성공해도 읽을 수 있었던 것이 된다.
+  if [ "${consecutive_failures}" -gt 0 ]; then
+    DRAIN_UNREADABLE=true
+    echo "drain could not read the database for the last ${consecutive_failures} polls (last known in progress: ${last_good:-unknown})" >&2
+  else
+    echo "drain hit the ${DRAIN_CAP_SECONDS}s cap (still in progress: ${remaining})" >&2
+  fi
+  return 1
+}
+
+COUNT_SQL="SELECT
+ (SELECT COUNT(*) FROM loan_limit_batch_run WHERE status='COMPLETED'),
+ (SELECT COUNT(*) FROM loan_limit_batch_run WHERE status='PARTIAL_FAILURE'),
+ (SELECT COUNT(*) FROM loan_limit_batch_run WHERE status='FAILED' AND fail_reason IS NULL),
+ (SELECT COUNT(*) FROM loan_limit_batch_run WHERE status='FAILED' AND fail_reason IS NOT NULL AND fail_reason NOT LIKE 'FINALIZE_FAILED:%'),
+ -- 집계 단계에서 터진 run. fan-out 은 끝났으므로 코드 문제가 아니라
+ -- 부하 증상이다. 섞으면 포화가 코드 문제로 보고된다.
+ (SELECT COUNT(*) FROM loan_limit_batch_run WHERE status='FAILED' AND fail_reason LIKE 'FINALIZE_FAILED:%'),
+ (SELECT COUNT(*) FROM loan_limit_batch_run WHERE status='IN_PROGRESS'),
+ -- 상태별 합과 비교할 전체 run 수. 이 비교가 실제로 깨질 수 있는 검사다 -
+ -- RunStatus 에 값이 하나 늘면 그 run 들이 어느 칸에도 안 잡힌다.
+ (SELECT COUNT(*) FROM loan_limit_batch_run),
+ (SELECT COUNT(*) FROM bank_call_result WHERE success=1),
+ (SELECT COUNT(*) FROM bank_call_result WHERE success=0 AND response_code='REJECTED'),
+ (SELECT COUNT(*) FROM bank_call_result WHERE success=0 AND response_code='SUBMIT_ERROR'),
+ (SELECT COUNT(*) FROM bank_call_result WHERE success=0 AND response_code='EXCEPTION'),
+ (SELECT COUNT(*) FROM bank_call_result WHERE success=0 AND response_code NOT IN ('REJECTED','SUBMIT_ERROR','EXCEPTION')),
+ (SELECT COUNT(*) FROM bank_call_result),
+ -- 예외로 끊긴 run 은 안 부른 은행의 행이 없는 게 정상이다. 빼지 않으면
+ -- 저장 실패로도 세어져 경고가 두 번 뜬다.
+ (SELECT COUNT(*) FROM loan_limit_batch_run r WHERE r.fail_reason IS NULL AND (SELECT COUNT(*) FROM bank_call_result b WHERE b.run_id=r.id) < r.requested_bank_count);"
+
+# 숫자 14개를 받아 JSON 으로 만든다.
+#
+# 합 검사는 run 상태에만 건다. RunStatus 에 값이 늘면 그 run 들이 어느 칸에도
+# 안 잡히고 사라지는데, 이 비교가 그걸 잡는다. 은행 호출 쪽은 마지막 버킷이
+# 캐치올이라 합이 항상 맞아서 검사할 게 없다.
+collect_counts() {
+  local row
+  row="$(db_query "${COUNT_SQL}")" || return 1
+
+  local fields
+  # shellcheck disable=SC2086
+  set -- ${row}
+  fields=$#
+  [ "${fields}" -eq 14 ] || { echo "expected 14 counts, got ${fields}: ${row}" >&2; return 1; }
+
+  local n
+  for n in "$@"; do
+    case "${n}" in
+      ''|*[!0-9]*) echo "non-numeric count in: ${row}" >&2; return 1 ;;
+    esac
+  done
+
+  local status_sum=$(( $1 + $2 + $3 + $4 + $5 + $6 ))
+  local balanced=true
+  if [ "${status_sum}" -ne "$7" ]; then
+    balanced=false
+    echo "run status sum ${status_sum} != loan_limit_batch_run rows $7" >&2
   fi
 
-  aws ssm get-command-invocation \
-    --region "${AWS_REGION}" \
-    --command-id "${cmd_id}" \
-    --instance-id "${instance}" \
-    --query 'StandardOutputContent' --output text
-}
-
-# 이미지를 태그가 아니라 다이제스트로 기록한다.
-# latest가 가리키는 대상이 바뀌어도 어느 빌드로 쟀는지가 남는다.
-resolve_digest() {
-  ssm_run "${GATEWAY_INSTANCE_ID}" \
-    "docker inspect --format '{{index .RepoDigests 0}}' \$(docker inspect --format '{{.Config.Image}}' gateway 2>/dev/null || echo none) 2>/dev/null || echo unknown" \
-    | tr -d '\r\n'
-}
-
-start_gateway() {
-  local spring_args="$1"
-  ssm_run "${GATEWAY_INSTANCE_ID}" \
-    "JAVA_TOOL_OPTIONS='${JAVA_OPTS}' /usr/local/bin/gateway-run.sh ${spring_args} ${EXTRA_ARGS}" >/dev/null
-}
-
-stop_gateway() {
-  ssm_run "${GATEWAY_INSTANCE_ID}" "docker rm -f gateway >/dev/null 2>&1 || true" >/dev/null
-}
-
-# 실효 처리율은 k6 지표로 셀 수 없다. 풀에서 거부된 트랜잭션도
-# 빠른 202를 받아 k6에는 성공으로 보이기 때문이다. 게이트웨이 로그를 센다.
-# 로그 원본은 A의 /var/log/bench/ 에 남겨두고 여기서는 숫자만 받는다.
-collect_counts() {
-  local run_id="$1"
-  ssm_run "${GATEWAY_INSTANCE_ID}" "$(cat <<SCRIPT
-mkdir -p /var/log/bench
-docker logs gateway > /var/log/bench/$(echo "${run_id}" | tr '/' '_').log 2>&1
-L=/var/log/bench/$(echo "${run_id}" | tr '/' '_').log
-printf '{"completed":%s,"partial":%s,"failed":%s,"run_errors":%s,"rejected_calls":%s,"submit_errors":%s,"persist_failures":%s}' \
-  "\$(grep -c 'Background fan-out completed.*status=COMPLETED' \$L || true)" \
-  "\$(grep -c 'Background fan-out completed.*status=PARTIAL' \$L || true)" \
-  "\$(grep -c 'Background fan-out completed.*status=FAILED' \$L || true)" \
-  "\$(grep -c 'Run marked as FAILED' \$L || true)" \
-  "\$(grep -c 'Bank call submission rejected' \$L || true)" \
-  "\$(grep -c 'Bank call submission failed' \$L || true)" \
-  "\$(grep -c 'Result persistence failed bankCode' \$L || true)"
-SCRIPT
-)"
-}
-
-# 종료 상태를 남긴 run 수만 센다. 드레인 판정용이라 가볍게 유지한다.
-count_terminal_runs() {
-  ssm_run "${GATEWAY_INSTANCE_ID}" \
-    "docker logs gateway 2>&1 | grep -c 'Background fan-out completed' || true" \
-    | tr -d '\r\n '
-}
-
-# 고정 sleep은 짧으면 안 끝난 트랜잭션이 누락되어(부하가 높을수록 심해져
-# 천장이 낮게 보인다) 길면 회차마다 죽는 시간이 쌓인다.
-# 종료 로그가 더 안 늘 때까지 기다리고 상한만 폴링 타임아웃에 맞춘다.
-drain_until_quiet() {
-  local cap=$(( MAX_WAIT_MS / 1000 + 30 ))
-  local waited=0 stable=0 prev="" cur=""
-
-  DRAIN_CAPPED=false
-
-  echo "draining in-flight transactions (max ${cap}s)..."
-  while [ "${waited}" -lt "${cap}" ]; do
-    sleep "${DRAIN_POLL_SECONDS}"
-    waited=$(( waited + DRAIN_POLL_SECONDS ))
-
-    cur="$(count_terminal_runs)" || cur=""
-    # --output text 는 빈 출력을 None으로 준다. 숫자가 아니면 버린다 —
-    # 안 그러면 None 두 번으로 "안정됐다"고 잘못 판단한다.
-    case "${cur}" in
-      ''|*[!0-9]*) cur="" ;;
-    esac
-
-    if [ -n "${cur}" ] && [ "${cur}" = "${prev}" ]; then
-      stable=$(( stable + 1 ))
-      if [ "${stable}" -ge "${DRAIN_STABLE_CHECKS}" ]; then
-        echo "drained after ${waited}s (terminal runs: ${cur})"
-        return 0
-      fi
-    else
-      stable=0
-    fi
-    prev="${cur}"
-  done
-
-  # stderr만으로는 몇 시간짜리 sweep에서 스크롤에 묻힌다.
-  # manifest에 남겨 parse.mjs가 경고할 수 있게 한다.
-  DRAIN_CAPPED=true
-  echo "drain hit the ${cap}s cap; counts may miss still-running transactions" >&2
+  jq -n \
+    --argjson completed "$1" --argjson partial "$2" \
+    --argjson failed_saturated "$3" --argjson failed_error "$4" \
+    --argjson failed_finalize "$5" --argjson in_progress "$6" \
+    --argjson runs_total "$7" \
+    --argjson calls_success "$8" --argjson calls_rejected "$9" \
+    --argjson calls_submit_error "${10}" --argjson calls_exception "${11}" \
+    --argjson calls_other "${12}" --argjson calls_total "${13}" \
+    --argjson runs_missing_rows "${14}" \
+    --argjson balanced "${balanced}" \
+    '{completed:$completed, partial:$partial,
+      failed_saturated:$failed_saturated, failed_error:$failed_error,
+      failed_finalize:$failed_finalize, in_progress:$in_progress,
+      runs_total:$runs_total,
+      calls_success:$calls_success, calls_rejected:$calls_rejected,
+      calls_submit_error:$calls_submit_error, calls_exception:$calls_exception,
+      calls_other:$calls_other, calls_total:$calls_total,
+      runs_missing_rows:$runs_missing_rows, balanced:$balanced}'
 }
 
 # ---------------------------------------------------------------------------
 # 측정 루프
 # ---------------------------------------------------------------------------
 
-echo "config      : ${CONFIG_NAME}"
-echo "mode        : ${MODE}"
-echo "pools       : ${POOLS}"
-echo "rpms        : ${RPMS}"
-echo "repeats     : ${REPEATS}"
-echo "duration    : ${DURATION}"
-echo "results     : ${RESULTS_ROOT}"
+echo "config    : ${CONFIG_NAME}"
+echo "modes     : ${MODES}"
+echo "pool      : ${POOL:-(기본값)}${POOL:+ / queue ${QUEUE} — async-threadpool 회차에만 적용}"
+echo "rpms      : ${RPMS}"
+echo "repeats   : ${REPEATS}"
+echo "duration  : ${DURATION} (${DURATION_SECONDS}s)"
+echo "results   : ${RESULTS_ROOT}"
 echo ""
 
-trap 'stop_gateway || true' EXIT
+trap 'gateway_stop || true' EXIT
 
-for pool in ${POOLS}; do
-  if [ "${pool}" = "default" ]; then
-    pool_label="default"
-    pool_args=""
-  else
-    # pool 또는 pool:queue 형태를 받는다
-    core="${pool%%:*}"
-    queue="${pool#*:}"
-    [ "${queue}" = "${pool}" ] && queue=200
-    pool_label="pool${core}-q${queue}"
-    pool_args="--app.async-thread-pool.core-pool-size=${core} --app.async-thread-pool.max-pool-size=${core} --app.async-thread-pool.queue-capacity=${queue}"
+invalid_rounds=0
+total_rounds=0
+
+for MODE in ${MODES}; do
+pool_label="$(pool_label_for "${MODE}")"
+pool_args="$(pool_args_for "${MODE}")"
+
+for rpm in ${RPMS}; do
+for rep in $(seq 1 "${REPEATS}"); do
+  run_id="${MODE}/${pool_label}/rpm${rpm}/rep${rep}"
+  out_dir="${RESULTS_ROOT}/${MODE}/${pool_label}/rpm${rpm}"
+  mkdir -p "${out_dir}"
+
+  echo "=============================================================="
+  echo "  ${CONFIG_NAME} / ${run_id}"
+  echo "=============================================================="
+
+  # 이 회차가 쓸 만한 숫자를 냈는지 여기 하나로 판단한다.
+  # 어느 단계가 실패하든 이 회차만 버리고 다음으로 간다.
+  round_ok=true
+  drain_capped=false
+  counts="null"
+
+  gateway_stop || true
+
+  # 순서를 바꾸지 말 것. apply 직후 DB 에는 스키마가 없고, Flyway 는 게이트웨이
+  # 기동 때 돈다. 비우기가 앞에 오면 첫 회차가 없는 테이블에서 막힌다.
+  if ! gateway_start "${pool_args}"; then
+    echo "gateway failed to start, skipping ${run_id}" >&2
+    round_ok=false
   fi
 
-  for rpm in ${RPMS}; do
-    for rep in $(seq 1 "${REPEATS}"); do
-      run_id="${pool_label}/rpm${rpm}/rep${rep}"
-      out_dir="${RESULTS_ROOT}/${pool_label}/rpm${rpm}"
-      mkdir -p "${out_dir}"
+  # 기동 직후, k6 전에 비운다. 지난 회차 행이 남아 있으면 같이 세진다.
+  if [ "${round_ok}" = true ] && ! db_reset; then
+    echo "could not clear tables, skipping ${run_id}" >&2
+    round_ok=false
+  fi
 
-      echo "=============================================================="
-      echo "  ${CONFIG_NAME} / ${run_id}"
-      echo "=============================================================="
+  digest="unknown"
+  started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-      # 회차마다 재기동한다. clean state 보장과 JVM 워밍업 변동 통제.
-      stop_gateway
-      if ! start_gateway "${pool_args}"; then
-        echo "gateway failed to start, skipping ${run_id}" >&2
-        continue
-      fi
+  if [ "${round_ok}" = true ]; then
+    digest="$(resolve_digest)" || digest="unknown"
 
-      digest="$(resolve_digest)"
-      started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    summary_file="${out_dir}/rep${rep}.summary.json"
+    k6_status=0
+    ( cd "${SCRIPT_DIR}" && \
+      MODE="${MODE}" \
+      LOAD_RPM="${rpm}" \
+      DURATION="${DURATION}" \
+      BASE_URL="${BASE_URL}" \
+      MAX_WAIT_MS="${MAX_WAIT_MS}" \
+      POLL_MAX_MS="${POLL_MAX_MS}" \
+      RUN_ID="${CONFIG_NAME}-${MODE}-${pool_label}-rpm${rpm}-rep${rep}" \
+      k6 run --summary-export="${summary_file}" load.js ) || k6_status=$?
 
-      summary_file="${out_dir}/rep${rep}.summary.json"
-      ( cd "${SCRIPT_DIR}" && \
-        MODE="${MODE}" \
-        LOAD_RPM="${rpm}" \
-        DURATION="${DURATION}" \
-        BASE_URL="${BASE_URL}" \
-        MAX_WAIT_MS="${MAX_WAIT_MS}" \
-        POLL_MAX_MS="${POLL_MAX_MS}" \
-        RUN_ID="${CONFIG_NAME}-${pool_label}-rpm${rpm}-rep${rep}" \
-        k6 run --summary-export="${summary_file}" load.js ) || \
-        echo "k6 exited non-zero for ${run_id} (continuing)" >&2
+    # 99 = threshold 위반. 부하는 다 걸린 것이라 회차를 버리지 않는다
+    # (threshold 는 천장에서 깨지므로 제일 중요한 회차가 사라진다).
+    if [ "${k6_status}" -eq 99 ]; then
+      echo "k6 threshold breached for ${run_id} (load was applied; keeping the round)" >&2
+    elif [ "${k6_status}" -ne 0 ]; then
+      # k6 가 죽어도 DB 는 0 을 돌려준다. 정상 0 과 구분되지 않으므로 무효 처리.
+      echo "k6 exited ${k6_status} for ${run_id}" >&2
+      round_ok=false
+    fi
+  fi
 
-      # k6는 DURATION + gracefulStop에서 멈추지만 트랜잭션 e2e가 최소 31초다.
-      # 막바지에 submit된 건들은 아직 종료 로그를 남기지 않았다.
-      drain_until_quiet
+  # k6 는 DURATION 에서 멈추지만 트랜잭션 e2e 하한이 31초다. 막바지에 넣은
+  # 것들이 아직 돌고 있으므로 기다린 뒤에 센다.
+  drained=false
+  drain_unreadable=false
+  if [ "${round_ok}" = true ]; then
+    if drain_wait; then
+      drained=true
+    else
+      drain_capped=true
+      drain_unreadable="${DRAIN_UNREADABLE}"
+    fi
+  fi
 
-      # SSM 일시 장애로 sweep 전체를 잃지 않는다. k6 실패를 넘기는 것과 같은 기준.
-      counts="$(collect_counts "${run_id}")" || counts=""
-      # --output text 는 빈 출력을 문자열 None으로 준다. jq --argjson이 죽는다.
-      case "${counts}" in
-        ''|None|null) counts="null" ;;
-      esac
-      # 이미 null로 정규화된 경우는 검사하지 않는다. jq -e 는 null을 실패로
-      # 취급해서, 진짜 원인 위에 가짜 파서 오류가 덧씌워진다.
-      if [ "${counts}" != "null" ] && ! echo "${counts}" | jq -e . >/dev/null 2>&1; then
-        echo "count collection returned unusable output for ${run_id}" >&2
-        counts="null"
-      fi
+  # 상한에 걸려도 숫자는 가져온다 — 천장 근처 회차의 거부 수치가 거기 있다.
+  # 회차는 무효로 둔다(안 끝난 트랜잭션을 두고 센 값이라 낮다).
+  counts_failed=false
+  if [ "${round_ok}" = true ]; then
+    if ! counts="$(collect_counts)"; then
+      counts="null"
+      counts_failed=true
+      round_ok=false
+    elif [ "$(echo "${counts}" | jq -r '.balanced')" != "true" ]; then
+      round_ok=false
+    elif [ "${drained}" != true ]; then
+      round_ok=false
+    fi
+  fi
 
-      stop_gateway || true
+  # 지우기 전에 로그를 뺀다. 표에서 이상이 보이면 A 의 /var/log/bench/ 를 본다.
+  save_gateway_log "${run_id}" || true
+  gateway_stop || true
 
-      # 이 회차를 재현하는 데 필요한 모든 것을 결과 옆에 남긴다.
-      jq -n \
-        --arg config "${CONFIG_NAME}" \
-        --arg run_id "${run_id}" \
-        --arg mode "${MODE}" \
-        --arg pool "${pool_label}" \
-        --argjson rpm "${rpm}" \
-        --argjson rep "${rep}" \
-        --arg duration "${DURATION}" \
-        --arg java_opts "${JAVA_OPTS}" \
-        --arg spring_args "${pool_args} ${EXTRA_ARGS}" \
-        --arg image "${digest}" \
-        --arg k6_version "${K6_VERSION}" \
-        --arg started_at "${started_at}" \
-        --argjson drain_capped "${DRAIN_CAPPED}" \
-        --argjson counts "${counts}" \
-        '{config:$config, run_id:$run_id, mode:$mode, pool:$pool, rpm:$rpm, repeat:$rep,
-          duration:$duration, java_opts:$java_opts, spring_args:$spring_args,
-          gateway_image:$image, k6_version:$k6_version, drain_capped:$drain_capped,
-          started_at:$started_at, gateway_counts:$counts}' \
-        > "${out_dir}/rep${rep}.manifest.json"
+  total_rounds=$(( total_rounds + 1 ))
+  [ "${round_ok}" = true ] || invalid_rounds=$(( invalid_rounds + 1 ))
 
-      echo "counts: ${counts}"
-      echo ""
-    done
-  done
+  jq -n \
+    --arg config "${CONFIG_NAME}" --arg run_id "${run_id}" \
+    --arg mode "${MODE}" --arg pool "${pool_label}" \
+    --argjson rpm "${rpm}" --argjson rep "${rep}" \
+    --arg duration "${DURATION}" \
+    --argjson duration_seconds "${DURATION_SECONDS}" \
+    --arg java_opts "${JAVA_OPTS}" \
+    --arg spring_args "${pool_args} ${EXTRA_ARGS}" \
+    --arg image "${digest}" --arg k6_version "${K6_VERSION}" \
+    --arg started_at "${started_at}" \
+    --argjson valid "${round_ok}" \
+    --argjson drain_capped "${drain_capped}" \
+    --argjson drain_unreadable "${drain_unreadable}" \
+    --argjson counts_failed "${counts_failed}" \
+    --argjson counts "${counts}" \
+    '{config:$config, run_id:$run_id, mode:$mode, pool:$pool, rpm:$rpm,
+      repeat:$rep, duration:$duration, duration_seconds:$duration_seconds,
+      java_opts:$java_opts, spring_args:$spring_args, gateway_image:$image,
+      k6_version:$k6_version, started_at:$started_at,
+      valid:$valid, drain_capped:$drain_capped,
+      drain_unreadable:$drain_unreadable, counts_failed:$counts_failed,
+      counts:$counts}' \
+    > "${out_dir}/rep${rep}.manifest.json"
+
+  echo "counts: ${counts}"
+  echo ""
+done
+done
 done
 
 echo "done. parse with:"
 echo "  node ${SCRIPT_DIR}/parse.mjs ${RESULTS_ROOT}"
+if [ "${invalid_rounds}" -gt 0 ]; then
+  echo ""
+  echo "${invalid_rounds}/${total_rounds} round(s) produced no usable numbers; marked valid=false" >&2
+fi
+
+# 한 회차도 못 건졌으면 실패로 끝낸다. `bench.sh && parse.mjs` 가 빈 표를
+# 찍고 넘어가지 않게.
+if [ "${total_rounds}" -gt 0 ] && [ "${invalid_rounds}" -eq "${total_rounds}" ]; then
+  echo "no usable rounds — check the gateway and the database on the A host" >&2
+  exit 1
+fi

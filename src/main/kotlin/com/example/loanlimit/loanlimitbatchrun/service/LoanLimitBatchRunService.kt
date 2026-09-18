@@ -88,6 +88,7 @@ class LoanLimitBatchRunService(
         runEntity.successCount = successCount
         runEntity.failureCount = failureCount
         runEntity.status = RunStatus.FAILED
+        runEntity.failReason = truncateFailReason(reason ?: "unknown")
         runEntity.finishedAt = LocalDateTime.now()
         batchRunRepository.save(runEntity)
 
@@ -118,5 +119,20 @@ class LoanLimitBatchRunService(
 
     companion object {
         private val log = LoggerFactory.getLogger(LoanLimitBatchRunService::class.java)
+
+        // loan_limit_batch_run.fail_reason 컬럼 길이
+        const val FAIL_REASON_MAX = 500
+
+        /**
+         * 컬럼을 넘기면 저장이 실패해 run 이 FAILED 로 표시조차 안 되므로 자른다.
+         * take() 만 쓰면 서로게이트 쌍이 갈려 MySQL 이 문자열을 거부한다.
+         */
+        fun truncateFailReason(reason: String): String {
+            if (reason.length <= FAIL_REASON_MAX) return reason
+            val end =
+                if (Character.isHighSurrogate(reason[FAIL_REASON_MAX - 1])) FAIL_REASON_MAX - 1
+                else FAIL_REASON_MAX
+            return reason.substring(0, end)
+        }
     }
 }

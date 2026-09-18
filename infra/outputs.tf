@@ -39,19 +39,21 @@ output "next_steps" {
        aws ssm start-session --target ${aws_instance.gateway.id} --region ${var.region}
        ls /var/lib/bench-ready && tail /var/log/bench-bootstrap.log
 
-    2) 측정 실행 (C 호스트에서)
-       bench.sh가 회차마다 게이트웨이를 SSM으로 재기동하고, k6를 돌리고,
-       로그 카운트를 받아 manifest.json에 조건과 함께 남긴다.
-       게이트웨이를 손으로 띄울 필요 없다 — 첫 회차에서 어차피 재기동된다.
+    2) 스모크 (C 호스트에서, 2~3분)
+       부하 없이 모드당 1건씩 넣어 은행 호출과 저장까지 도는지 본다.
+       게이트웨이를 손으로 띄울 필요 없다 — 스크립트가 띄운다.
 
        aws ssm start-session --target ${aws_instance.k6.id} --region ${var.region}
        cd /opt/fan-out-call/perf/k6
-       ./bench.sh config/v15-baseline.env
+       ./smoke.sh
 
-    3) 결과 보기
-       node parse.mjs results/v15-baseline
+    3) 측정 (스모크가 PASS 한 뒤)
+       ./bench.sh config/v15-pool512.env
+       node parse.mjs results/v15-pool512
 
-    4) 측정 끝나면 반드시
+    4) 결과를 로컬로 내려받는다 (destroy 하면 C 와 함께 사라진다)
+
+    5) 측정 끝나면 반드시
        terraform destroy
   EOT
 }
