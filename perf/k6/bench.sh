@@ -99,7 +99,9 @@ pool_args_for() {
   fi
 }
 
-K6_VERSION="$(k6 version 2>/dev/null | head -1)"
+# k6 가 PATH 에 없으면 파이프라인이 실패하고 set -e 가 여기서 죽인다.
+# || true 로 감싸야 아래 폴백이 도달한다.
+K6_VERSION="$( { k6 version 2>/dev/null || true; } | head -1 )"
 K6_VERSION="${K6_VERSION:-unknown}"
 
 RESULTS_ROOT="${SCRIPT_DIR}/results/${CONFIG_NAME}"
@@ -154,10 +156,11 @@ COUNT_SQL="SELECT
  (SELECT COUNT(*) FROM loan_limit_batch_run WHERE status='COMPLETED'),
  (SELECT COUNT(*) FROM loan_limit_batch_run WHERE status='PARTIAL_FAILURE'),
  (SELECT COUNT(*) FROM loan_limit_batch_run WHERE status='FAILED' AND fail_reason IS NULL),
- (SELECT COUNT(*) FROM loan_limit_batch_run WHERE status='FAILED' AND fail_reason IS NOT NULL AND fail_reason NOT LIKE 'FINALIZE_FAILED:%'),
+ -- LIKE 에서 _ 는 한 글자 와일드카드다. 접두사 그대로 맞추려면 이스케이프한다.
+ (SELECT COUNT(*) FROM loan_limit_batch_run WHERE status='FAILED' AND fail_reason IS NOT NULL AND fail_reason NOT LIKE 'FINALIZE\\_FAILED:%'),
  -- 집계 단계에서 터진 run. fan-out 은 끝났으므로 코드 문제가 아니라
  -- 부하 증상이다. 섞으면 포화가 코드 문제로 보고된다.
- (SELECT COUNT(*) FROM loan_limit_batch_run WHERE status='FAILED' AND fail_reason LIKE 'FINALIZE_FAILED:%'),
+ (SELECT COUNT(*) FROM loan_limit_batch_run WHERE status='FAILED' AND fail_reason LIKE 'FINALIZE\\_FAILED:%'),
  (SELECT COUNT(*) FROM loan_limit_batch_run WHERE status='IN_PROGRESS'),
  -- 상태별 합과 비교할 전체 run 수. 이 비교가 실제로 깨질 수 있는 검사다 -
  -- RunStatus 에 값이 하나 늘면 그 run 들이 어느 칸에도 안 잡힌다.
