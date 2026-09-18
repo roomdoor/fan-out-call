@@ -26,6 +26,16 @@ output "connect" {
   }
 }
 
+output "region" {
+  description = "스택이 뜬 리전. 스크립트가 읽는다."
+  value       = var.region
+}
+
+output "results_bucket" {
+  description = "측정 결과 회수 버킷. perf/k6/fetch-results.sh 가 쓴다."
+  value       = aws_s3_bucket.results.bucket
+}
+
 output "db_password" {
   description = "MySQL root 비밀번호. apply마다 새로 생성되며 저장소에 들어가지 않는다."
   value       = random_password.db.result

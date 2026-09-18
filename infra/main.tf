@@ -28,6 +28,36 @@ resource "random_password" "db" {
   special = false
 }
 
+# ---------------------------------------------------------------------------
+# 측정 결과 회수 버킷
+#
+# 결과는 C 호스트 디스크에만 있고 destroy 하면 같이 사라진다. C 에서 여기로
+# 올리고 로컬에서 내려받는다 — 일회용 인스턴스에 GitHub 권한을 두지 않으려고
+# 한 단계를 거친다.
+# ---------------------------------------------------------------------------
+
+# 버킷 이름은 전역이라 계정 ID 를 붙여 충돌을 피한다.
+data "aws_caller_identity" "current" {}
+
+resource "aws_s3_bucket" "results" {
+  bucket = "${var.name_prefix}-results-${data.aws_caller_identity.current.account_id}"
+
+  # 내려받은 뒤에는 로컬과 저장소에 남으므로 버킷은 비워도 된다. false 면
+  # 객체가 있을 때 destroy 가 실패해서 버킷만 남고 요금이 계속 나간다.
+  # 내려받기 전에 destroy 하면 사라지므로 fetch-results.sh 를 먼저 돌릴 것.
+  force_destroy = true
+
+  tags = { Name = "${var.name_prefix}-results" }
+}
+
+resource "aws_s3_bucket_public_access_block" "results" {
+  bucket                  = aws_s3_bucket.results.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
 # user-data에 넣지 않는다. IMDS로 인스턴스의 모든 프로세스가 읽을 수 있고,
 # 게이트웨이는 --network host 라 컨테이너 안에서도 읽힌다.
 resource "aws_ssm_parameter" "db_password" {
@@ -259,6 +289,17 @@ data "aws_iam_policy_document" "bench_control" {
     resources = ["*"]
   }
 
+  # 측정 결과를 회수 버킷으로 올린다. 쓰기만 준다 — 내려받아 커밋하는 건
+  # 로컬에서 하고, 이 호스트에는 GitHub 권한을 두지 않는다.
+  statement {
+    actions   = ["s3:PutObject"]
+    resources = ["${aws_s3_bucket.results.arn}/*"]
+  }
+
+  statement {
+    actions   = ["s3:ListBucket"]
+    resources = [aws_s3_bucket.results.arn]
+  }
 }
 
 # 비밀번호 읽기는 별도 정책으로 둔다. bench_control은 게이트웨이 ARN을
