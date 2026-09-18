@@ -40,9 +40,11 @@ cmd_id="$(aws ssm send-command --region "${REGION}" --instance-ids "${K6_ID}" \
   --parameters "commands=[\"aws s3 sync ${REMOTE_RESULTS}/ s3://${BUCKET}/results/ --only-show-errors && echo UPLOAD_OK\"],executionTimeout=[\"1800\"]" \
   --query 'Command.CommandId' --output text)"
 
+# SSM 쪽 executionTimeout(1800) 과 맞춘다. 짧게 잡으면 아직 도는 업로드를
+# 실패로 보고 내려받기도 건너뛰는데, 여기가 destroy 전 마지막 관문이다.
 status=Pending
 waited=0
-while [ "${waited}" -lt 600 ]; do
+while [ "${waited}" -lt 1800 ]; do
   status="$(aws ssm get-command-invocation --region "${REGION}" \
     --command-id "${cmd_id}" --instance-id "${K6_ID}" \
     --query 'Status' --output text 2>/dev/null)" || status=Pending

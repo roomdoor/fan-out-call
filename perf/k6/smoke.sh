@@ -17,10 +17,22 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${BASE_URL:?BASE_URL not set}"
 
 MODES="${MODES:-coroutine async-threadpool webclient}"
+
+# bench.sh 와 같은 이유로 막는다. 트랜잭션 하나가 9분이라 여기서는 반드시
+# 타임아웃 나고, 배포가 고장난 것처럼 FAIL 로 보고된다.
+for mode in ${MODES}; do
+  if [ "${mode}" = "sequential" ]; then
+    echo "sequential 은 측정하지 않는다 (perf/k6/README.md)" >&2
+    exit 1
+  fi
+done
 MYSQL_CONTAINER="${MYSQL_CONTAINER:-mysql}"
 MYSQL_DATABASE="${MYSQL_DATABASE:-loan_limit_gateway}"
-JAVA_OPTS="${JAVA_OPTS:-}"
-EXTRA_ARGS="${EXTRA_ARGS:-}"
+# 측정 설정들과 같은 JVM 조건으로 띄운다. 기본값(Dispatchers.IO 64)으로
+# 두면 모드 셋을 동시에 넣을 때 IO 워커가 말라서, 측정 경로에는 없는
+# 이유로 스모크만 실패한다.
+JAVA_OPTS="${JAVA_OPTS:--Dkotlinx.coroutines.io.parallelism=512}"
+EXTRA_ARGS="${EXTRA_ARGS:---server.tomcat.threads.max=200 --app.web-client-fan-out.max-connections=8000}"
 
 # 은행 50곳 중 2곳이 30~45초짜리다. 한 건이 끝나는 데 그만큼 걸린다.
 WAIT_SECONDS="${WAIT_SECONDS:-120}"

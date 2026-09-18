@@ -159,12 +159,20 @@ const notes = [];
 const invalid = runs.filter((r) => !r.valid);
 if (invalid.length > 0) {
   // 드레인이 안 끝난 것과 DB 를 못 읽은 것을 갈라 적는다.
-  const unreadable = invalid.filter((r) => r.drainUnreadable).length;
-  const capped = invalid.filter((r) => r.drainCapped && !r.drainUnreadable).length;
-  const unbalanced = invalid.filter((r) => !r.balanced).length;
-  // 집계 쿼리가 실패한 회차. 안 갈라두면 "기동·k6 실패" 로 뭉뚱그려진다.
-  const countsFailed = invalid.filter((r) => r.countsFailed).length;
-  const rest = invalid.length - capped - unreadable - unbalanced - countsFailed;
+  // 한 회차가 여러 조건에 걸릴 수 있다(드레인 상한 + 집계 실패 등).
+  // 각 회차를 한 범주에만 넣어야 합이 맞고 잔여가 음수로 안 간다.
+  let unreadable = 0;
+  let capped = 0;
+  let countsFailed = 0;
+  let unbalanced = 0;
+  let rest = 0;
+  for (const r of invalid) {
+    if (r.drainUnreadable) unreadable += 1;
+    else if (r.drainCapped) capped += 1;
+    else if (r.countsFailed) countsFailed += 1;
+    else if (!r.balanced) unbalanced += 1;
+    else rest += 1;
+  }
   notes.push(
     `⚠️ 무효 회차 ${invalid.length}건 (표에서 제외). ` +
       `드레인 상한 ${capped}건, 드레인 중 DB 못 읽음 ${unreadable}건, ` +

@@ -143,6 +143,10 @@ class LoanLimitQueryOrchestrator(
                 // 코드 문제로 뒤바뀐다. 못 남기면 IN_PROGRESS 로 두는 편이 낫다.
                 try {
                     loanLimitBatchRunService.markRunFailed(runId, "$FINALIZE_FAILED_PREFIX${e.message}")
+                } catch (cancelled: CancellationException) {
+                    // CancellationException 은 IllegalStateException 을 상속한다.
+                    // 아래로 넘기면 종료 중 취소가 정상 완료로 보고된다.
+                    throw cancelled
                 } catch (ignored: Exception) {
                     log.error("Could not mark the run as FAILED after finalization failure", ignored)
                 }
