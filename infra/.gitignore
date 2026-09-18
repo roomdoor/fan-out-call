@@ -4,6 +4,11 @@
 *.tfstate.*
 .terraform.tfstate.lock.info
 
+# 저장된 실행 계획. state 와 마찬가지로 생성된 MySQL 비밀번호가 들어간다.
+tfplan
+tfplan-*
+*.tfplan
+
 # 프로바이더 바이너리. 수백 MB다.
 .terraform/
 
