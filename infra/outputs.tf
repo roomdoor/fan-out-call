@@ -61,9 +61,12 @@ output "next_steps" {
        ./bench.sh config/v15-pool512.env
        node parse.mjs results/v15-pool512
 
-    4) 결과를 로컬로 내려받는다 (destroy 하면 C 와 함께 사라진다)
+    4) 결과를 로컬로 내려받는다. destroy 하면 C 와 버킷이 같이 사라지므로
+       반드시 5) 보다 먼저 돌릴 것.
 
-    5) 측정 끝나면 반드시
+       ./perf/k6/fetch-results.sh
+
+    5) 내려받은 결과를 커밋한 뒤
        terraform destroy
   EOT
 }
