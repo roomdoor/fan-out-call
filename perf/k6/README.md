@@ -28,6 +28,13 @@ cd /opt/fan-out-call/perf/k6
 node parse.mjs results/v15-pool512
 ```
 
+설정을 새로 만들었으면 호스트에서 먼저 당겨야 한다. C 는 부팅 때 한 번만
+클론하므로, 그 뒤에 추가된 파일은 `config not found` 로 끝난다.
+
+```bash
+git -C /opt/fan-out-call pull origin main
+```
+
 `BASE_URL`, `GATEWAY_INSTANCE_ID`, `AWS_REGION` 은 Terraform이
 `/etc/profile.d/bench.sh` 에 심어둔다.
 
