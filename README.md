@@ -1,136 +1,176 @@
-# Loan Limit Gateway — 50개 외부 금융사 fan-out 호출 성능 최적화
+# Loan Limit Gateway — 50개 외부 금융사 fan-out 호출 성능 측정
 
 Spring Boot 4 + Kotlin 기반의 대출 한도 조회 게이트웨이.
-한 트랜잭션이 50개 외부 금융사 API를 병렬 호출(fan-out)하고 결과를 종합·저장하는 구조.
+한 트랜잭션이 50개 외부 금융사 API를 병렬 호출(fan-out)하고 결과를 종합·저장한다.
 
-**이 저장소의 목적**: 동일 비즈니스 로직을 **4가지 동시성 모델**로 구현하고, 실제 부하 테스트로 **단일 파드 처리 한계를 정량 비교**.
+**목적**: 동일한 비즈니스 로직을 **4가지 동시성 모델**로 구현하고, 같은 부하에서 **무엇이 처리 한계를 정하는지** 실측한다.
 
-mock 서버: [`roomdoor/fan-out-api-mock-server`](https://github.com/roomdoor/fan-out-api-mock-server) (Ktor 기반, 10 샤드)
+mock 서버: [`roomdoor/fan-out-api-mock-server`](https://github.com/roomdoor/fan-out-api-mock-server) (Ktor, 10 샤드)
+
+측정 환경: AWS 3호스트 — 게이트웨이+MySQL(c7i.2xlarge), mock(m7i.xlarge), k6(c7i.2xlarge). 같은 AZ.
 
 ---
 
-## TL;DR — 동시성 모델 선택만으로 처리량 10배 차이
+## TL;DR
 
-mock 응답 시간 정상 7~13s · slow 30s × 2개 환경에서 단일 파드 안전 처리량:
+**블로킹 모델의 천장은 스레드 수가 정한다. 논블로킹은 그 제약이 없다.**
 
-| 모드 | 구현 핵심 | 안전 한계 (RPM) | async-threadpool 대비 |
+| 모드 | 스레드 | 480 RPM 결과 | 지연이 유지되는 한계 |
 | --- | --- | --- | --- |
-| **async-threadpool** | `@Async + ThreadPoolTaskExecutor` (blocking) | **60 RPM** | 1× (baseline) |
-| **webclient** | `WebFlux` + Reactor non-blocking | **400 RPM** | **6.7×** |
-| **coroutine** (공유 WebClient) | Kotlin coroutines + `awaitAll()` | **600 RPM** | **10×** |
-| sequential | 단일 스레드 순차 호출 (anti-pattern 시연용) | — | — |
+| **async-threadpool** | 풀 **4,096** | 은행콜 3,409건 거부, 처리율 338.8/분 | 480에서 이미 포화 |
+| **coroutine** | IO 디스패처 **512** | 거부 0, 처리율 480.3/분 | **1,600 RPM** |
+| **webclient** | 이벤트 루프 + 저장만 IO **512** | 거부 0, 처리율 480.3/분 | **1,600 RPM** |
+| sequential | 1 | — | anti-pattern 시연용 |
 
-> **mock 고정 지연 기반 · 상대 비교용 수치 · 실제 금융사 성능 보장 아님**
+**스레드를 9분의 1만 쓰고 부하를 전부 받아냈다.** async-threadpool 쪽은 풀 4,096에 더해 IO 워커 512를 함께 받았다(4,608 대 512).
 
-핵심 결론:
-- **thread pool 크기 증가는 어느 지점부터 효과 없음** — pool 512 → 1024로 2배 늘려도 처리량 변화 0%
-- **blocking I/O 모델의 천장은 thread 점유 시간이 결정** — 1 bank task가 30초 스레드 점유 → pool/30s가 곧 천장
-- **non-blocking 전환 시 스레드 자원과 무관해짐** — 처리량 6.7~10배 향상, 한계 초과 시 fail-fast → graceful degradation
+거부한 쪽의 게이트웨이 CPU가 16%였다 — 자원이 없어서 거부한 게 아니다.
 
----
+논블로킹 두 모드는 1,800 RPM에서도 7,200건을 **전부 처리했다.** 거부가 아니라 지연이 늘었을 뿐이다(31.4초 → 56.3 / 44.6초). 위 표의 1,600은 "이론 하한 지연을 유지하는" 한계다.
 
-## 핵심 성능 데이터
-
-### 1. 모드별 처리 양상 (RPM별 COMPLETED 트랜잭션 수)
-
-| RPM | async-threadpool | webclient | coroutine (공유 WebClient) |
-| --- | --- | --- | --- |
-| 60 | 112 (100%) ✅ | 120 (100%) ✅ | 120 (100%) ✅ |
-| 80 | **53 (33%)** ⚠️ | 161 (100%) ✅ | 161 (100%) ✅ |
-| 100 | **35 (21%)** ❌ | 201 (100%) ✅ | 201 (100%) ✅ |
-| 200 | — | 400 (100%) ✅ | 401 (100%) ✅ |
-| 400 | — | 800 (100%) ✅ | 800 (100%) ✅ |
-| 500 | — | **879 (88%)** ⚠️ | 1,000 (100%) ✅ |
-| 600 | — | **604 (50%)** ❌ | **1,201 (100%)** ✅ |
-| 700 | — | 459 (33%) ❌ | 310 (22%) ❌ |
-
-- async-threadpool은 thread pool 거부(`RejectedExecutionException`)로 80 RPM에서 67% 실패
-- webclient는 500 RPM부터 PARTIAL(일부 은행만 응답)로 graceful하게 저하
-- coroutine은 600 RPM까지 완벽 처리, 700에서 첫 PARTIAL 발생
-
-### 2. e2e 지연 (p95)
-
-| RPM | async-threadpool | coroutine |
-| --- | --- | --- |
-| 60 | 41.6s | 31.6s |
-| 80 | 90.0s (timeout) | 31.7s |
-| 100 | 90.0s (timeout) | 31.8s |
-| 600 | — | **32.6s** (안정) |
-| 700 | — | 106.7s (한계) |
-
-mock 환경의 이론치 최소 e2e = 30s (slow bank 30s). coroutine은 600 RPM에서도 이론치 거의 일치 → 게이트웨이 오버헤드 무시 가능 수준.
+> mock 고정 지연(정상 48개 7~13초, slow 2개 30초, 성공률 100%) 기반의 상대 비교다. 실제 금융사 성능이 아니다.
 
 ---
 
-## 성능 조사 여정 (12세대 sweep)
+## 1. 스레드 풀 천장은 `pool ÷ 9`
 
-`perf/k6/results/v1~v12/` 디렉토리에 각 단계의 raw 데이터와 보고서 보관.
+요청 1건이 스레드를 얼마나 쓰는지 세면 나온다.
 
-| 버전 | 가설/시도 | 결과 |
+```
+48개 은행 × 10초  = 480 스레드초
+ 2개 은행 × 30초  =  60 스레드초
+────────────────────────────────
+                    540 스레드초 = 9 스레드분
+```
+
+블로킹 호출은 응답을 기다리는 내내 스레드를 붙잡는다. 그래서 풀 N개가 1분에 공급하는 N 스레드분을 9로 나눈 값이 한계다.
+
+**4배 구간에서 확인했다.**
+
+| pool | 계산 천장 | 깨끗한 점 | 막힌 점 | 거부된 은행콜 |
+| --- | --- | --- | --- | --- |
+| 512 | 57 | 30 ✅ | 60 | 317 |
+| 1024 | 114 | 60 ✅ | 120 | 740 |
+| 2048 | 228 | 120 ✅ | 240 | 1,641 |
+| 4096 | 455 | 240 ✅ | 480 | 3,409 |
+
+**각 풀에서 막힌 RPM이 다음 풀에서는 정확히 0이다.** 세 번 연속 그랬다. 같은 60 RPM이 pool 512에서는 317건 거부, pool 1024에서는 0건이다.
+
+천장 값 자체(57/114/228/455)는 계산이고 재지 않았다. 잰 것은 위의 구간이다.
+
+원본: [`perf/k6/results/v15-pool512`](perf/k6/results/v15-pool512) 외 3개.
+
+---
+
+## 2. 논블로킹은 다른 자리에서 꺾인다
+
+같은 512 스레드로 RPM을 올리며 e2e p95를 봤다. 이론 하한은 31초(slow 은행 30초 + 오버헤드).
+
+| RPM | coroutine | webclient |
 | --- | --- | --- |
-| v1 | pool 크기만 변경 (64/128/256/512), mock 500ms | 작은 풀이 더 빨라보이는 측정 함정 발견 — 실은 빠른 실패가 e2e를 끌어내림 |
-| v2 | pool×queue 동반 확장 (320→2560 슬롯, 8×) | p95가 오히려 35× 악화. 슬롯 확장 ≠ 처리량 개선 |
-| v3 | mock을 realistic (7~13s + slow 30s)으로 변경 | 진짜 부하 환경 도입. 50 RPS stress 부하는 시스템 한계의 5배라 비교 불가 |
-| v4 | 부하를 RPM 단위(20~100)로 변경, 고정 부하 | **단일 파드 안전 한계: 60 RPM 확정** (async-threadpool 기준) |
-| v5 | asymmetric pool (core=200/max=500/queue=200) | 천장은 같음. 무너지는 방식만 다름(fail-fast vs timeout) |
-| v6 | pool 512/1024/2048 matrix sweep | **pool=1024는 pool=512 대비 0% 개선**. 병목 다른 곳 확정. pool=2048은 macOS native thread 한계 초과로 무효 |
-| v7 | elastic vs fixed pool (c=512/m=1024 vs c=m=1024) | sustained 부하에선 사실상 동일 |
-| v8 | Hikari 가설 검증 (default 10 vs 50) | **반증** — Hikari는 병목 아님 |
-| v9 | WebFlux 모드 도입 | **돌파** — 100 RPM까지 FAILED 0건 |
-| v10 | webclient 천장 탐색 (120~700 RPM) | webclient 안전 한계 **400 RPM** 확인 |
-| v11 | coroutine 모드 첫 테스트 | Reactor Netty pending acquire queue 포화 — 무효 |
-| v12 | coroutine 버그 수정 (공유 WebClient) 후 재테스트 | **600 RPM까지 100% 처리** — 최종 답 |
+| 480 | 31,396ms | 31,392ms |
+| 960 | 31,409ms | 31,401ms |
+| 1200 | 31,425ms | 31,418ms |
+| 1400 | 31,533ms | 31,471ms |
+| 1600 | 32,044ms | 31,632ms |
+| **1800** | **56,344ms** | **44,550ms** |
 
-### 발견한 버그 (v11 → v12)
+**1600까지 이론 하한에 붙어 있다가 1800에서 꺾인다.** 전 구간 거부 0이다.
 
-`ExternalBankApiService`가 50개 은행마다 개별 WebClient 풀을 생성 → 고RPM에서 Reactor Netty `Pending acquire queue` 포화로 PARTIAL 폭증.
+**포화를 표현하는 방식이 다르다.**
 
-수정:
-- 신규 `config/WebClientConfig.kt`: `sharedBankWebClient` bean (`maxConnections=2000, pendingAcquireMaxCount=10000`)
-- `ExternalBankApiService`: 은행별 개별 WebClient → 공유 WebClient 1개
-- `BankApiServiceRegistry`: `@Qualifier("sharedBankWebClient")` 주입
+| | 포화 신호 | 받은 요청은 |
+| --- | --- | --- |
+| async-threadpool | 즉시 거부 (큐 200칸이 차면) | 31~36초에 끝낸다 |
+| 논블로킹 | 지연 증가 | 다 받지만 다 늦어진다 |
 
-이 한 줄짜리 수정으로 coroutine 안전 한계가 webclient(400) 대비 **1.5배(600 RPM)** 으로 도약.
+논블로킹에도 대기열은 있다(`pendingAcquireMaxCount` 10,000 — 이것도 샤드마다라 실질 100,000, 60초 타임아웃). 다만 이번 부하에서는 커넥션 여유가 커서 한 번도 걸리지 않았고, 그래서 거절 없이 지연만 늘었다.
+
+어느 쪽이 나은지는 요구사항이 정한다 — "늦어도 다 처리"면 논블로킹, "빠르거나 거절"이면 큐 있는 쪽이다.
+
+**두 논블로킹 구현은 1600까지 구분되지 않는다.** 1200에서 7ms 차이다. 1800에서 처음 갈린다(webclient가 21% 빠름). 차이는 "코루틴이냐 Reactor냐"가 아니라 **"스레드를 붙잡느냐 놓느냐"** 에 있다.
+
+원본: [`v15-coroutine`](perf/k6/results/v15-coroutine) · [`v15-webclient`](perf/k6/results/v15-webclient) · [`v15-nonblocking-knee`](perf/k6/results/v15-nonblocking-knee)
+
+---
+
+## 3. 왜 스레드가 9배 많은데 지는가
+
+**스레드가 노는 게 아니라, 막혀 있으면서 자리를 차지한다.**
+
+480 RPM이면 은행 호출 4,320개가 동시에 떠 있다. 블로킹은 그걸 감당하려면 스레드가 4,320개 필요하다 — **스레드가 "일하는 단위"가 아니라 "떠 있는 요청의 자리표"** 가 된다.
+
+CPU가 증거다.
+
+| | 게이트웨이 CPU |
+| --- | --- |
+| async-threadpool, 480 RPM에서 3,409건 거부 | 약 16% |
+| coroutine, 1,200 RPM 무흠집 | 31% |
+
+기계가 84% 놀고 있는데 거부했다.
+
+> CPU는 CloudWatch(`AWS/EC2 CPUUtilization`)를 측정 시각으로 조회한 값이다. **기본 모니터링이라 5분 단위**인데 회차는 4분이라, 한 데이터포인트에 유휴 구간이 섞인다. 실제 부하 중 CPU는 이 값보다 높다 — **자릿수 비교용이지 정확한 수치가 아니다.** `bench.sh` 도 `parse.mjs` 도 CPU를 기록하지 않으므로 `results/` 에는 없다.
+
+---
+
+## 미해결
+
+**1800 RPM에서 지연이 뛰는 원인을 못 찾았다.**
+
+| 후보 | 검증 |
+| --- | --- |
+| 커넥션 풀 | 20,000 → 40,000, 지연 1.0% 차이. 애초에 근처도 안 갔다(위 참고) |
+| IO 워커 | 512 → 1,024, webclient는 오히려 16% 악화 |
+| CPU | k6 5.8% / 게이트웨이 38.4% / mock 20.1% (CloudWatch) |
+| **DB 저장** | 초당 1,500건, 게이트웨이와 같은 호스트. **미검증** |
+| **은행 호출 타임아웃** | `per-call-timeout-ms: 50000`. 1800에서 e2e 최대가 69초까지 갔고 `conn40k` 회차에 예외 4건이 났다. **미검증** |
+
+IO 워커를 늘렸더니 느려진 것이 DB 쪽을 가리킨다. 두 모드 모두 결과 저장을 `Dispatchers.IO` 로 넘기므로, 워커가 두 배면 MySQL로 가는 동시 저장도 두 배다.
+
+**논블로킹 천장도 못 찾았다.** 1800에서 꺾이지만 거부가 없어 "천장"의 정의가 필요하다. SLA를 정하면(예: e2e p95 45초) 그 지점이 천장이 된다.
+
+**전부 n=1이다.** 커밋된 24회차 모두 `repeat: 1` 이다. pool512는 실제로 두 번 쟀고 결론(30 깨끗 / 60 거부)이 같았지만, 1차 측정 파일이 인스턴스 교체 때 사라져 **레포에서는 확인할 수 없다.**
 
 ---
 
 ## 방법론
 
-### 부하 테스트 설계
-- **mock 환경**: 실서비스 응답 분포를 모사. 정상 은행 48개는 7~13s 랜덤, slow 은행 2개는 30s 고정. 100% 성공.
-- **부하 도구**: k6 `constant-arrival-rate` 모드. 도착률 일정하게 유지하며 시스템이 무너지는 지점을 정확히 측정.
-- **측정 단위**: 분(RPM). 트랜잭션당 30초가 걸리는 환경에서 초 단위(RPS)는 직관적이지 않음.
-- **회차당 시간**: 2분. constant-arrival-rate라 충분히 정상 상태 도달.
-- **게이트웨이 매 회차 재기동**: clean state 보장, JVM 워밍업 변동 통제.
+### 숫자를 DB에서 센다
 
-### 측정 지표
-k6 메트릭(`iterations`, `e2e_completion_time`, `timeout_waiting_rate`, `checks`)만으로는 부족 — 풀에서 거부된 트랜잭션도 빠른 200/202를 받아 "성공한 응답"으로 보일 수 있음. 그래서 게이트웨이 로그를 직접 파싱:
+k6 지표로는 실효 처리율을 못 잰다 — 풀에서 거부된 트랜잭션도 빠른 `202` 를 받아 k6에는 성공으로 보인다.
 
-- `Background fan-out completed status=COMPLETED`: 50/50 모두 성공한 트랜잭션
-- `Background fan-out completed status=PARTIAL`: 일부 은행만 응답
-- `Run marked as FAILED ... ExecutorService ... did not accept task`: 풀 거부
+그래서 게이트웨이가 남긴 DB 행을 센다. 은행 호출은 다섯 갈래, 트랜잭션 상태는 여섯 갈래로 나누고, **상태별 합이 전체 run 수와 같은지** 회차마다 검사한다. 어느 칸에도 안 잡히는 상태가 생기면 그 회차를 무효로 표시한다.
 
-`results/REPORT.md` 표의 "실효 처리율"은 모두 이 게이트웨이 로그 카운트 기반.
+### 드레인
 
-### 자동화 스크립트
+k6는 `DURATION` 에서 멈추지만 트랜잭션 하나가 최소 31초다. 막바지에 넣은 건들이 끝날 때까지 기다린 뒤에 센다. 짧게 기다리면 처리량이 낮게 나오고, **부하가 셀수록 많이 빠져 천장이 실제보다 낮아 보인다.**
 
-| 스크립트 | 용도 |
+`status='IN_PROGRESS'` 가 0이면 끝이다. 추측하지 않는다.
+
+### 회차가 실패해도 그 회차만 버린다
+
+기동 실패, k6 비정상 종료, DB 쿼리 실패, 드레인 상한, 집계 불일치 — 어느 쪽이든 그 회차에 `valid: false` 를 남기고 다음으로 간다. 스크립트가 실행 중에 "천장이다"라고 판단해서 남은 회차를 건너뛰지 않는다. 그 판단은 사람이 표를 보고 한다.
+
+### 조건 추적
+
+회차마다 manifest에 이미지 **다이제스트**, JVM 플래그, Spring 인자, duration, k6 버전을 남긴다. 태그가 아니라 다이제스트라 `latest` 가 가리키는 대상이 바뀌어도 어느 빌드였는지 남는다.
+
+설계 배경은 [`perf/k6/DECISIONS.md`](perf/k6/DECISIONS.md).
+
+### 자동화
+
+| 경로 | 용도 |
 | --- | --- |
-| `perf/k6/bench.sh` | 측정 오케스트레이터. k6 호스트에서 돌며 게이트웨이 호스트를 SSM으로 제어 |
-| `perf/k6/config/*.env` | 측정 세대 정의. 세대 하나가 파일 하나 |
-| `perf/k6/parse.mjs` | 결과 + manifest 통합 파싱 → 마크다운 표 |
+| `perf/k6/smoke.sh` | 배포 직후 점검. 모드당 1건, 부하 없음 |
+| `perf/k6/bench.sh` | 측정 오케스트레이터. k6 호스트에서 돌며 게이트웨이를 SSM으로 제어 |
+| `perf/k6/config/*.env` | 측정 세대 하나 = 파일 하나 |
+| `perf/k6/parse.mjs` | 결과 + manifest → 마크다운 표 |
+| `perf/k6/fetch-results.sh` | 결과를 S3 경유로 로컬 회수 |
 | `infra/` | 측정용 AWS 3호스트 Terraform |
-
-새 환경에서도 인자 한 줄로 모든 sweep 재현 가능.
-
-### 환경 제약 발견
-
-테스트 중 시스템 한계 정의를 명확히 한 사례:
-- **pool=2048**: macOS `kern.num_taskthreads=2,048` 초과 → `OutOfMemoryError: unable to create native thread` 43건. ulimit 사전 점검 필요성 문서화.
 
 ---
 
-## 권장 운영 설정 (요약)
+## 운영 참고
 
 ```yaml
 app:
@@ -138,27 +178,22 @@ app:
     parallelism: 50
     per-call-timeout-ms: 50000
   web-client-fan-out:
-    routing-mode: sharded   # 10 샤드에 부하 분산
+    routing-mode: sharded      # 10 샤드에 분산
+    max-connections: 20000     # 샤드(원격 주소)마다 적용된다. 아래 참고
 ```
 
-```kotlin
-// WebClientConfig.kt
-WebClient.builder()
-  .clientConnector(ReactorClientHttpConnector(
-    HttpClient.create(
-      ConnectionProvider.builder("shared-bank")
-        .maxConnections(2000)
-        .pendingAcquireMaxCount(10000)
-        .build()
-    )
-  )).build()
-```
+**모드 선택**
 
-**모드 선택**: 동시성 모델 선호와 코드 스타일에 따라
-- **coroutine** — 최고 처리량(600 RPM), 코드 동기-유사 스타일
-- **webclient** — 안정적인 400 RPM, 순수 Reactor 스타일
+- **coroutine / webclient** — 이 부하 범위에서 차이가 없다. 코드 스타일로 고르면 된다
+- **async-threadpool** — 쓰려면 `pool ≥ 목표 RPM × 9` 를 확보해야 한다. 480 RPM이면 4,320개다
 
-**SLA 설정 예 (마진 30%)**: coroutine 모드 기준 **분당 420건/파드**. 그 이상은 수평 확장.
+**`max-connections` 는 전체가 아니라 원격 주소마다다.** Reactor Netty의 `ConnectionProvider` 가 그렇게 동작하고, mock이 10샤드로 갈려 있어 풀이 10개 생긴다. `pendingAcquireMaxCount` 도 마찬가지다.
+
+**샤드당 수요는 균등하지 않다.** 샤딩이 `(bankNumber-1) % 10` 이라 30초짜리 느린 은행 2개가 한두 샤드에 몰린다. 가장 무거운 샤드가 `4×10 + 30 = 70` 커넥션초를 쓰므로 `RPM × 1.17` 이고, 둘이 같은 샤드면 `RPM × 1.5` 다. 20,000이면 약 13,000~17,000 RPM까지 여유가 있다.
+
+이번 측정에서 커넥션은 한 번도 제약이 아니었다. 20,000 → 40,000으로 올려도 지연이 1.0%밖에 안 변한 이유다.
+
+**커넥션 풀은 스레드보다 싸다.** 스레드 1개가 1MB 스택을 쓰는 반면 커넥션은 수십 KB다. 논블로킹은 비싼 자원(스레드)을 싼 자원(커넥션)으로 바꾸는 셈이다.
 
 ---
 
@@ -178,14 +213,15 @@ bank/                   BankApiService 인터페이스 + ExternalBankApiService 
 config/                 AppProperties, AsyncExecutionConfig, WebClientConfig
 ```
 
-- submit API는 모드별 `*LoanLimitQueryController`로 분리되어 있고 내부에서 `LoanLimitQueryOrchestrator`로 수렴
+- submit API는 모드별 `*LoanLimitQueryController`로 분리되고 내부에서 `LoanLimitQueryOrchestrator`로 수렴
 - polling은 `LoanLimitBatchRunController` 단일 엔드포인트
-- 각 fan-out executor는 `BankFanOutExecutor` 인터페이스를 구현, `BankFanOutExecutorRegistry`가 모드별 매핑
+- 각 executor는 `BankFanOutExecutor` 를 구현, `BankFanOutExecutorRegistry` 가 모드별 매핑
+- 은행 호출은 네 모드가 **하나의 WebClient 풀을 공유**한다 (`WebClientConfig.sharedBankWebClient`)
 
 ### API
 
 ```
-POST /api/v1/loan-limit/queries                       # coroutine
+POST /api/v1/loan-limit/coroutine/queries
 POST /api/v1/loan-limit/async-threadpool/queries
 POST /api/v1/loan-limit/webclient/queries
 POST /api/v1/loan-limit/sequential/queries
@@ -203,41 +239,67 @@ GET  /api/v1/loan-limit/queries/number/{transactionNo}
 }
 ```
 
-submit은 즉시 `202 Accepted`와 `transactionNo`, `requestId` 반환. fan-out은 백그라운드에서 진행되고 polling으로 진행도 확인.
+submit은 즉시 `202 Accepted` 와 `transactionNo`, `requestId` 를 반환한다. fan-out은 백그라운드에서 진행되고 polling으로 확인한다.
+
+### 실패 격리
+
+은행 하나의 실패가 나머지를 막지 않는다. 막는 자리가 종류별로 다르다.
+
+- **저장 실패** — `LoanLimitQueryOrchestrator` 가 `onEachResult` 를 감싼다. 정의되는 곳이 한 곳뿐이라 네 모드가 같은 정책을 쓴다
+- **제출 실패** — 모드마다 구조가 달라 각 executor가 맡는다
+- **풀 거부** — async-threadpool만 해당. `REJECTED` 행으로 기록
+
+`status='FAILED'` 는 세 가지로 갈린다 — 은행을 다 호출했는데 성공이 0(부하 신호), 집계 단계에서 막힘(DB 부하), fan-out이 예외로 중단(코드 문제). `fail_reason` 컬럼이 그 구분자다.
 
 ---
 
 ## 실행
 
-측정 인프라 구축은 [`infra/README.md`](infra/README.md), 측정 스크립트 사용법은 [`perf/k6/README.md`](perf/k6/README.md) 참조.
+측정 인프라는 [`infra/README.md`](infra/README.md), 측정 스크립트는 [`perf/k6/README.md`](perf/k6/README.md).
 
-### 빠른 시작
+### AWS에서 측정
+
 ```bash
-# 1. mock 서버 클론 및 설치
+# 로컬 (저장소 루트)
+terraform -chdir=infra init && terraform -chdir=infra apply
+terraform -chdir=infra output next_steps
+
+# k6 호스트 안에서 (세션 접속 명령은 output connect 에 있다)
+sudo -i
+cd /opt/fan-out-call/perf/k6
+./smoke.sh                            # 배포 직후 점검, 2~3분
+./bench.sh config/v15-pool512.env
+
+# 다시 로컬에서
+./perf/k6/fetch-results.sh            # 결과 회수. destroy 전에 반드시
+terraform -chdir=infra destroy
+```
+
+인스턴스는 쓸 때만 켠다. 측정 사이에는 `stop` 으로 내려두면 결과가 디스크에 남고 EBS 요금만 든다.
+
+### 로컬에서 기동
+
+```bash
 git clone git@github.com:roomdoor/fan-out-api-mock-server.git
 export MOCK_SERVER_DIR=$PWD/fan-out-api-mock-server
 (cd "$MOCK_SERVER_DIR" && ./gradlew installDist)
 
-# 2. MySQL 기동
 docker compose up -d mysql
 
-# 3. mock fleet 기동 (realistic 지연 프로파일)
 (cd "$MOCK_SERVER_DIR/perf" && \
   set -a && source realistic.env && set +a && \
   docker compose up -d --build)
 
-# 4. 게이트웨이 빌드 & 기동
 ./gradlew bootJar
 java -jar build/libs/loan-limit-gateway-*.jar \
   --app.web-client-fan-out.routing-mode=sharded
-
-# 5. 부하 테스트 (분당 100건 coroutine 모드)
-MODE=coroutine LOAD_RPM=100 DURATION=2m \
-  k6 run --summary-export=results/test.json perf/k6/load.js
 ```
 
+로컬은 동작 확인용이다. **성능 측정에는 쓰지 않는다** — 아래 참조.
+
 ### 필요한 도구
-JDK 25, Docker, k6, Node.js (파서용).
+
+JDK 25, Docker, k6, Node.js, Terraform, AWS CLI.
 
 ---
 
@@ -246,13 +308,13 @@ JDK 25, Docker, k6, Node.js (파서용).
 **Backend**: Kotlin · Spring Boot 4 · Spring WebFlux · Kotlin Coroutines · JPA + Flyway · MySQL 8.4
 **Async**: ThreadPoolTaskExecutor · Reactor Netty · `Dispatchers.IO`
 **Mock**: Ktor (별도 저장소)
-**Testing**: k6 · Docker Compose · Micrometer (gateway metrics)
-**Build/Run**: Gradle (Kotlin DSL) · JDK 25 toolchain
+**측정**: k6 · Terraform · AWS (EC2 · SSM · S3)
+**Build**: Gradle (Kotlin DSL) · JDK 25 toolchain
 
 ---
 
-## 결과 디렉토리 안내
+## 결과 디렉터리
 
-`perf/k6/results/v1~v14/` — 각 세대 raw JSON + REPORT.md.
+`perf/k6/results/v15-*` — 이 문서의 모든 수치. AWS 3호스트 실측 24회차.
 
-v1~v14는 게이트웨이·mock·MySQL·k6가 모두 한 macOS 기계에 있던 시절의 측정이다. 각 REPORT.md에 적힌 실행 명령은 당시 측정 스크립트(`load_sweep.sh` 등) 기준이며, 그 스크립트들은 AWS 3호스트 구성으로 옮기면서 `bench.sh` 로 대체됐다. 과거 기록이므로 그대로 둔다.
+`perf/k6/results/v1~v14` — 게이트웨이·mock·MySQL·k6를 한 대에 올려 측정했다. 어느 쪽이 병목인지 구분되지 않아 결과를 쓰지 않는다. 기록으로만 남겨둔다.
