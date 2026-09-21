@@ -24,6 +24,7 @@ k6를 B와 합치지 않는 이유는, k6가 CPU를 먹으면 mock 응답이 느
 - AWS 자격증명 (`aws configure` 또는 `AWS_PROFILE`)
 - **GHCR 패키지 두 개가 public 이어야 한다.** 저장소가 public이어도 패키지는 private으로 생성될 수 있다. 각 저장소 → Packages → Package settings → Change visibility → Public
 - **`repo_ref` 가 가리키는 ref에 `perf/k6/bench.sh` 가 있어야 한다.** C 호스트가 그 ref를 클론해서 측정 스크립트를 얻는다. 기본값은 `main` 이므로, 측정 스크립트가 아직 머지되지 않았다면 `-var repo_ref=<브랜치>` 로 지정할 것. 없으면 부트스트랩이 중단되고 `/var/lib/bench-ready` 가 생기지 않는다.
+  단, **최초 `apply` 에서만 정하고 그 뒤로는 바꾸지 말 것.** 세 인스턴스 모두 `user_data_replace_on_change = true` 라, 값이 바뀌면 인스턴스가 교체되고 디스크의 측정 결과가 사라진다. 이미 떠 있는 호스트에 새 스크립트·설정을 넣을 때는 `git -C /opt/fan-out-call pull` 을 쓴다.
 
 ## 사용
 

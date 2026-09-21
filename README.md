@@ -11,7 +11,7 @@ mock 서버: [`roomdoor/fan-out-api-mock-server`](https://github.com/roomdoor/fa
 
 ---
 
-## TL;DR
+## 요약
 
 **블로킹 모델의 천장은 스레드 수가 정한다. 논블로킹은 그 제약이 없다.**
 
@@ -23,6 +23,8 @@ mock 서버: [`roomdoor/fan-out-api-mock-server`](https://github.com/roomdoor/fa
 | sequential | 1 | — | anti-pattern 시연용 |
 
 **스레드를 9분의 1만 쓰고 부하를 전부 받아냈다.** async-threadpool 쪽은 풀 4,096에 더해 IO 워커 512를 함께 받았다(4,608 대 512).
+
+숫자보다 중요한 건 **대기 중에 스레드를 붙잡느냐**다. async-threadpool 은 `AsyncBankCallWorker` 의 `runBlocking` 이 응답이 올 때까지 풀 스레드를 점유한다. coroutine 도 은행 호출을 `async(Dispatchers.IO)` 로 띄우지만 `awaitSingle()` 에서 suspend 하므로, 기다리는 동안 워커를 풀에 돌려준다. 그래서 512로 4,608보다 많이 처리한다.
 
 거부한 쪽의 게이트웨이 CPU가 16%였다 — 자원이 없어서 거부한 게 아니다.
 
@@ -45,7 +47,7 @@ mock 서버: [`roomdoor/fan-out-api-mock-server`](https://github.com/roomdoor/fa
 
 블로킹 호출은 응답을 기다리는 내내 스레드를 붙잡는다. 그래서 풀 N개가 1분에 공급하는 N 스레드분을 9로 나눈 값이 한계다.
 
-**4배 구간에서 확인했다.**
+**512에서 4096까지 확인했다.**
 
 | pool | 계산 천장 | 깨끗한 점 | 막힌 점 | 거부된 은행콜 |
 | --- | --- | --- | --- | --- |
@@ -64,7 +66,7 @@ mock 서버: [`roomdoor/fan-out-api-mock-server`](https://github.com/roomdoor/fa
 
 ## 2. 논블로킹은 다른 자리에서 꺾인다
 
-같은 512 스레드로 RPM을 올리며 e2e p95를 봤다. 이론 하한은 31초(slow 은행 30초 + 오버헤드).
+IO 워커를 512로 고정하고 RPM만 올리며 e2e p95를 봤다. 이론 하한은 31초(slow 은행 30초 + 오버헤드).
 
 | RPM | coroutine | webclient |
 | --- | --- | --- |
@@ -88,7 +90,7 @@ mock 서버: [`roomdoor/fan-out-api-mock-server`](https://github.com/roomdoor/fa
 
 어느 쪽이 나은지는 요구사항이 정한다 — "늦어도 다 처리"면 논블로킹, "빠르거나 거절"이면 큐 있는 쪽이다.
 
-**두 논블로킹 구현은 1600까지 구분되지 않는다.** 1200에서 7ms 차이다. 1800에서 처음 갈린다(webclient가 21% 빠름). 차이는 "코루틴이냐 Reactor냐"가 아니라 **"스레드를 붙잡느냐 놓느냐"** 에 있다.
+**두 논블로킹 구현은 1600까지 구분되지 않는다.** 1200에서 7ms 차이다. 1800에서 처음 갈린다(webclient가 21% 빠름).
 
 원본: [`v15-coroutine`](perf/k6/results/v15-coroutine) · [`v15-webclient`](perf/k6/results/v15-webclient) · [`v15-nonblocking-knee`](perf/k6/results/v15-nonblocking-knee)
 
@@ -107,7 +109,7 @@ CPU가 증거다.
 | async-threadpool, 480 RPM에서 3,409건 거부 | 약 16% |
 | coroutine, 1,200 RPM 무흠집 | 31% |
 
-기계가 84% 놀고 있는데 거부했다.
+CPU가 한참 남는데 거부했다.
 
 > CPU는 CloudWatch(`AWS/EC2 CPUUtilization`)를 측정 시각으로 조회한 값이다. **기본 모니터링이라 5분 단위**인데 회차는 4분이라, 한 데이터포인트에 유휴 구간이 섞인다. 실제 부하 중 CPU는 이 값보다 높다 — **자릿수 비교용이지 정확한 수치가 아니다.** `bench.sh` 도 `parse.mjs` 도 CPU를 기록하지 않으므로 `results/` 에는 없다.
 
@@ -123,9 +125,13 @@ CPU가 증거다.
 | IO 워커 | 512 → 1,024, webclient는 오히려 16% 악화 |
 | CPU | k6 5.8% / 게이트웨이 38.4% / mock 20.1% (CloudWatch) |
 | **DB 저장** | 초당 1,500건, 게이트웨이와 같은 호스트. **미검증** |
-| **은행 호출 타임아웃** | `per-call-timeout-ms: 50000`. 1800에서 e2e 최대가 69초까지 갔고 `conn40k` 회차에 예외 4건이 났다. **미검증** |
+| **은행 호출 타임아웃** | `per-call-timeout-ms: 50000`. 1800에서 e2e 최대가 69초까지 갔고 `conn40k` 의 coroutine 회차에 예외 4건이 났다(24회차 중 예외가 난 유일한 회차). **미검증** |
 
-IO 워커를 늘렸더니 느려진 것이 DB 쪽을 가리킨다. 두 모드 모두 결과 저장을 `Dispatchers.IO` 로 넘기므로, 워커가 두 배면 MySQL로 가는 동시 저장도 두 배다.
+DB 쪽을 의심하는 이유는 이렇다. **webclient 는 IO 워커를 결과 저장에만 쓴다** (`mono(Dispatchers.IO) { onEachResult }`). 그래서 워커를 두 배로 올리면 MySQL로 가는 동시 저장이 그대로 두 배가 되고, 실제로 16.1% 느려졌다.
+
+**coroutine 은 같은 변경에서 2.4% 빨라졌다**(55,766ms → 54,419ms). 이쪽은 은행 호출까지 `async(Dispatchers.IO)` 로 띄우므로, 워커가 늘면 저장뿐 아니라 호출 쪽 여유도 같이 늘어 상쇄됐을 수 있다.
+
+설명은 되지만 확인된 건 아니다. n=1 이고, 저장 부하를 따로 떼어 재보지 않았다.
 
 **논블로킹 천장도 못 찾았다.** 1800에서 꺾이지만 거부가 없어 "천장"의 정의가 필요하다. SLA를 정하면(예: e2e p95 45초) 그 지점이 천장이 된다.
 
@@ -143,7 +149,7 @@ k6 지표로는 실효 처리율을 못 잰다 — 풀에서 거부된 트랜잭
 
 ### 드레인
 
-k6는 `DURATION` 에서 멈추지만 트랜잭션 하나가 최소 31초다. 막바지에 넣은 건들이 끝날 때까지 기다린 뒤에 센다. 짧게 기다리면 처리량이 낮게 나오고, **부하가 셀수록 많이 빠져 천장이 실제보다 낮아 보인다.**
+k6는 `DURATION` 에서 멈추지만 트랜잭션 하나의 이론 하한이 31초다(거부가 섞이면 그 호출이 즉시 끝나 더 짧아진다). 막바지에 넣은 건들이 끝날 때까지 기다린 뒤에 센다. 짧게 기다리면 처리량이 낮게 나오고, **부하가 셀수록 많이 빠져 천장이 실제보다 낮아 보인다.**
 
 `status='IN_PROGRESS'` 가 0이면 끝이다. 추측하지 않는다.
 
@@ -179,7 +185,9 @@ app:
     per-call-timeout-ms: 50000
   web-client-fan-out:
     routing-mode: sharded      # 10 샤드에 분산
-    max-connections: 20000     # 샤드(원격 주소)마다 적용된다. 아래 참고
+    max-connections: 20000     # 기본값은 2000. v15 측정은 인자로 덮어썼다
+                               # (pool 스윕 네 판은 8000). 샤드(원격 주소)
+                               # 마다 적용된다 — 아래 참고
 ```
 
 **모드 선택**
@@ -202,8 +210,8 @@ app:
 ### 패키지 구조
 
 ```
-loanLimitBatchRun/      submit 공통 오케스트레이션 + polling
-bankCallResult/         은행 결과 저장 + retry
+loanlimitbatchrun/      submit 공통 오케스트레이션 + polling
+bankcallresult/         은행 결과 저장 + retry
 fanout/                 4가지 fan-out 실행 전략
   coroutine/            CoroutineBankFanOutExecutor
   asyncpool/            AsyncThreadPoolBankFanOutExecutor + Worker
@@ -211,6 +219,7 @@ fanout/                 4가지 fan-out 실행 전략
   sequential/           SequentialSingleThreadBankFanOutExecutor (bad-case)
 bank/                   BankApiService 인터페이스 + ExternalBankApiService 구현
 config/                 AppProperties, AsyncExecutionConfig, WebClientConfig
+logging/                MDC 키와 전파 (네 모드 공통)
 ```
 
 - submit API는 모드별 `*LoanLimitQueryController`로 분리되고 내부에서 `LoanLimitQueryOrchestrator`로 수렴
@@ -277,6 +286,10 @@ terraform -chdir=infra destroy
 
 인스턴스는 쓸 때만 켠다. 측정 사이에는 `stop` 으로 내려두면 결과가 디스크에 남고 EBS 요금만 든다.
 
+> **`apply` 를 다시 돌릴 때 `-var` 값을 바꾸지 말 것.** 세 인스턴스 모두 `user_data_replace_on_change = true` 라, `repo_ref` 가 바뀌면 인스턴스가 **교체되고 디스크의 측정 결과가 같이 사라진다.** v15 때 이걸로 pool512 결과를 날려 다시 쟀다.
+>
+> cloud-init 은 인스턴스당 한 번만 돈다 — `stop`/`start` 로는 재부트스트랩이 안 된다. 새 설정·스크립트는 호스트에서 `git -C /opt/fan-out-call pull` 로 받는다.
+
 ### 로컬에서 기동
 
 ```bash
@@ -291,8 +304,7 @@ docker compose up -d mysql
   docker compose up -d --build)
 
 ./gradlew bootJar
-java -jar build/libs/loan-limit-gateway-*.jar \
-  --app.web-client-fan-out.routing-mode=sharded
+java -jar build/libs/loan-limit-gateway-*.jar
 ```
 
 로컬은 동작 확인용이다. **성능 측정에는 쓰지 않는다** — 아래 참조.
