@@ -107,7 +107,7 @@ K6_VERSION="${K6_VERSION:-unknown}"
 RESULTS_ROOT="${SCRIPT_DIR}/results/${CONFIG_NAME}"
 mkdir -p "${RESULTS_ROOT}"
 
-# 드레인 상한. 트랜잭션 하나의 e2e 하한이 31초라 여유를 둔다.
+# 드레인 상한. 트랜잭션 하나가 최소 30초는 걸리므로(느린 은행의 sleep) 여유를 둔다.
 DRAIN_CAP_SECONDS=$(( MAX_WAIT_MS / 1000 + 60 ))
 
 # shellcheck source=lib/remote.sh
@@ -306,7 +306,7 @@ for rep in $(seq 1 "${REPEATS}"); do
     fi
   fi
 
-  # k6 는 DURATION 에서 멈추지만 트랜잭션 e2e 하한이 31초다. 막바지에 넣은
+  # k6 는 DURATION 에서 멈추지만 트랜잭션 하나가 최소 30초는 걸린다. 막바지에 넣은
   # 것들이 아직 돌고 있으므로 기다린 뒤에 센다.
   drained=false
   drain_unreadable=false
