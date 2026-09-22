@@ -214,6 +214,9 @@ EXTRA_ARGS="--server.tomcat.threads.max=200"
     31초 근처의 간격이 5초라 그 안의 차이는 안 보인다
   - **회차 끝에서 잘린 iteration 은 안 들어간다.** 1800 RPM 회차에서 DB 가 센 것의
     84.4~96.1% 만 남았고, 빠지는 건 제일 느린 것들이다
-  - **타임아웃은 `MAX_WAIT_MS`(180,000) 가 그대로 더해진다.** 실제 소요가 아니다
+  - **타임아웃은 `MAX_WAIT_MS` 가 그대로 더해진다.** 실제 소요가 아니다.
+    커밋된 24회차에서는 한 번도 안 났다(`timeout_waiting_rate` 전부 0).
+    기본값은 `lib/common.js` 가 60,000 이고 `bench.sh` 가 180,000 으로 덮는다 —
+    v15 설정은 전부 후자다
 - `polls_per_transaction` — 트랜잭션당 폴링 횟수
 - `timeout_waiting_rate` — 대기 중 타임아웃 비율
