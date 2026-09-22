@@ -215,8 +215,11 @@ EXTRA_ARGS="--server.tomcat.threads.max=200"
   - **회차 끝에서 잘린 iteration 은 안 들어간다.** 1800 RPM 회차에서 DB 가 센 것의
     84.4~96.1% 만 남았고, 빠지는 건 제일 느린 것들이다
   - **타임아웃은 `MAX_WAIT_MS` 가 그대로 더해진다.** 실제 소요가 아니다.
-    커밋된 24회차에서는 한 번도 안 났다(`timeout_waiting_rate` 전부 0).
-    기본값은 `lib/common.js` 가 60,000 이고 `bench.sh` 가 180,000 으로 덮는다 —
-    v15 설정은 전부 후자다
-- `polls_per_transaction` — 트랜잭션당 폴링 횟수
+    v15 24회차에서는 한 번도 안 났지만(`timeout_waiting_rate` 전부 0),
+    v1~v14 에는 0.20~1.00 인 회차가 20개 있다 — 그 회차들의 지연 지표에는
+    상수가 섞여 있다. 기본값은 `lib/common.js` 가 60,000 이고 `bench.sh` 가
+    180,000 으로 덮는다
+- `polls_per_transaction` — 이름과 달리 **총 폴링 횟수**(Counter)다.
+  트랜잭션당 값을 보려면 `iterations` 로 나눌 것. 그 값이 정수면 모든 트랜잭션이
+  같은 폴에서 끝났다는 뜻이고, 아니면 눈금이 흩어진 것이다
 - `timeout_waiting_rate` — 대기 중 타임아웃 비율
