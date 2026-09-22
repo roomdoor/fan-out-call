@@ -205,6 +205,9 @@ EXTRA_ARGS="--server.tomcat.threads.max=200"
 
 ## 커스텀 지표
 
-- `e2e_completion_time` — submit부터 종료 상태까지
+- `e2e_completion_time` — submit 이 **202 를 돌려준 뒤부터**, 폴링이 종료 상태를 확인할 때까지.
+  접수 시간은 안 들어가고, 폴링 간격(100ms 에서 1.5배씩, 5,000ms 상한)만큼 위로 반올림된다.
+  31초 근처에서는 눈금이 5초라 그 안의 차이가 안 보인다 — 저장소 루트 README 의
+  "회차마다 게이트웨이를 재기동한다" 절 참고.
 - `polls_per_transaction` — 트랜잭션당 폴링 횟수
 - `timeout_waiting_rate` — 대기 중 타임아웃 비율
